@@ -2,20 +2,54 @@
   "version": "2.0.0",
   "tasks": [
     {
+      // CLI 版本不需要 fltk，也就不需要 cmake/ninja，是最好上手的调试入口
+      "label": "cargo build (cli)",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--no-default-features", "--features", "cli"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "echo": true },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      // GUI 版本需要 fltk：必须先装好 cmake 或 ninja + MSVC C++ 生成工具
+      "label": "cargo build (gui)",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--features", "gui"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "presentation": { "reveal": "always", "echo": true },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "cargo clippy",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["clippy", "--all-targets", "--", "-D", "warnings"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "none",
+      "presentation": { "reveal": "always", "echo": true },
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "cargo test",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["test", "--no-default-features", "--features", "cli"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "test",
+      "presentation": { "reveal": "always", "echo": true },
+      "problemMatcher": ["$rustc"]
+    },
+    {
       "label": "Inno Setup: Compile Script",
       "type": "process",
       "command": "ISCC.exe",
-      "args": [
-        "${file}"
-      ],
-      "presentation": {
-        "reveal": "always",
-        "echo": false
-      },
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      }
+      "args": ["${file}"],
+      "presentation": { "reveal": "always", "echo": false },
+      "group": "none"
     }
   ]
 }

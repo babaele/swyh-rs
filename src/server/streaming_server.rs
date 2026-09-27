@@ -12,6 +12,7 @@ use crate::{
     },
     fl,
     globals::statics::{get_config, insert_client, remove_client},
+    netease::{parse_netease_path, serve_netease_track},
     rendercontrol::WavData,
     server::query_params::StreamingParams,
     utils::ui_logger::{LogCategory, ui_log},
@@ -91,6 +92,13 @@ pub fn run_server(
                     );
                     #[cfg(debug_assertions)]
                     dump_rq_headers(&rq);
+                    // the NetEase source is a separate endpoint: relay the
+                    // original audio file instead of the captured stream
+                    let path = rq.url().split('?').next().unwrap_or(rq.url());
+                    if let Some(song_id) = parse_netease_path(path) {
+                        serve_netease_track(rq, song_id);
+                        return;
+                    }
                     // validate the request URL before building the context
                     let sp = StreamingParams::from_url(rq.url());
                     if sp.path.is_none() {

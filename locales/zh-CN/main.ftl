@@ -39,6 +39,30 @@ tab-audio = 音频
 tab-network = 网络
 tab-app = 应用
 tab-status = 状态
+tab-netease = 网易云
+
+# 网易云音乐
+netease-api-label = API 服务地址：
+netease-cookie-label = Cookie（可选）：
+netease-quality-label = 音质：
+netease-search-label = 搜索歌曲：
+netease-playlist-label = 歌单 ID：
+netease-renderer-label = 渲染器：
+btn-netease-search = 搜索
+btn-netease-load = 载入
+btn-netease-refresh = 刷新
+btn-netease-play = 播放
+btn-netease-playall = 播放全部
+btn-netease-next = 下一首
+btn-netease-stop = 停止
+netease-api-changed = 网易云 API 地址已更改为 { $url }
+netease-cookie-changed = 网易云 Cookie 已更新
+netease-quality-changed = 网易云音质已更改为 { $quality }
+netease-search-result = 搜索「{ $keywords }」找到 { $count } 首歌曲
+netease-playlist-loaded = 歌单 { $id } 已载入 { $count } 首歌曲
+netease-bad-playlist = 无效的歌单 ID：{ $id }
+netease-no-track = 网易云：没有可播放的曲目，请先搜索或载入歌单
+netease-no-renderer = 网易云：没有可用的渲染器，请先发现并选择一台设备
 
 # Status messages
 status-setup-audio = 配置音频源

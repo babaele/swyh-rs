@@ -2,100 +2,59 @@
     // Use IntelliSense to learn about possible attributes.
     // Hover to view descriptions of existing attributes.
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    //
+    // 调试器类型说明：本项目用的是 x86_64-pc-windows-msvc 工具链，所以这里统一用
+    // "cppvsdbg"（VS Code 的 C/C++ 扩展提供，Windows 原生调试器）。
+    // 原来的 "lldb" 需要 macOS/Linux 或 CodeLLDB 扩展，在 msvc 工具链下不能直接用。
     "version": "0.2.0",
     "configurations": [
         {
-            "type": "lldb",
+            "type": "cppvsdbg",
             "request": "launch",
-            "name": "Debug unit tests in library 'swyh-rs'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--lib",
-                    "--package=swyh-rs"
-                ],
-                "filter": {
-                    "name": "swyh-rs",
-                    "kind": "lib"
-                }
-            },
+            "name": "调试 GUI (swyh-rs)",
+            "program": "${workspaceFolder}/target/debug/swyh-rs.exe",
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "cargo build (gui)",
+            "console": "integratedTerminal",
+            "stopAtEntry": false
         },
         {
-            "type": "lldb",
+            "type": "cppvsdbg",
             "request": "launch",
-            "name": "Debug executable 'swyh-rs'",
-            "cargo": {
-                "args": [
-                    "build",
-                    "--bin=swyh-rs",
-                    "--package=swyh-rs"
-                ],
-                "filter": {
-                    "name": "swyh-rs",
-                    "kind": "bin"
-                }
-            },
+            "name": "调试 CLI (swyh-rs-cli)",
+            "program": "${workspaceFolder}/target/debug/swyh-rs-cli.exe",
+            // 不带参数 = 原来的「抓声卡推送」模式。
+            // 想调试网易云直推，把下面这些放开（IP 换成你自己的渲染器）：
+            // "--netease_playlist", "24381616",
+            // "--netease_search", "周杰伦 搁浅",
+            // "--netease_quality", "lossless",
+            // "-o", "192.168.1.26"
             "args": [],
-            "cwd": "${workspaceFolder}"
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "cargo build (cli)",
+            "console": "integratedTerminal",
+            "stopAtEntry": false
         },
         {
-            "type": "lldb",
+            "type": "cppvsdbg",
             "request": "launch",
-            "name": "Debug unit tests in executable 'swyh-rs'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--bin=swyh-rs",
-                    "--package=swyh-rs"
-                ],
-                "filter": {
-                    "name": "swyh-rs",
-                    "kind": "bin"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug executable 'swyh-rs-cli'",
-            "cargo": {
-                "args": [
-                    "build",
-                    "--bin=swyh-rs-cli",
-                    "--package=swyh-rs"
-                ],
-                "filter": {
-                    "name": "swyh-rs-cli",
-                    "kind": "bin"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in executable 'swyh-rs-cli'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--bin=swyh-rs-cli",
-                    "--package=swyh-rs"
-                ],
-                "filter": {
-                    "name": "swyh-rs-cli",
-                    "kind": "bin"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
+            "name": "调试网易云直推 (swyh-rs-cli)",
+            "program": "${workspaceFolder}/target/debug/swyh-rs-cli.exe",
+            // 记得把 192.168.1.26 换成你自己的渲染器 IP，
+            // 并且先在 3000 端口跑起 NeteaseCloudMusicApi
+            "args": [
+                "--netease_search",
+                "周杰伦 搁浅",
+                "--netease_quality",
+                "lossless",
+                "-o",
+                "192.168.1.26"
+            ],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "cargo build (cli)",
+            "console": "integratedTerminal",
+            "stopAtEntry": false
         }
     ]
 }

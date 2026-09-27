@@ -15,6 +15,7 @@ A "Stream-What-You-Hear" implementation written in Rust, MIT licensed.
 - [Changelog](CHANGELOG.md)
 - [swyh-rs as your local internet radio station](#swyh-rs-as-your-local-internet-radio-station)
 - [SlimProto (Squeezelite) support](#slimproto-squeezelite-support)
+- [NetEase Cloud Music source](#netease-cloud-music-网易云音乐-source)
 - [Todo](#todo)
 - [Building (Wiki)](https://github.com/dheijl/swyh-rs/wiki)
 - [Hotspot and Internet Connection Sharing with Sonos (Wiki)](https://github.com/dheijl/swyh-rs/wiki#6-using-an-internet-hotspot-and-windows-ics-internet-connection-sharing-with-sonos-by-ebizmarket-kelly-guzman)
@@ -258,6 +259,61 @@ Since version 1.21.0, swyh-rs speaks the **SlimProto** protocol used by [squeeze
 - SlimProto has lower latency to start streaming than UPnP/DLNA.
 - all swyh-rs audio formats (FLAC, WAV, RF64, LPCM) are supported.
 - SlimProto support is enabled by default, and can be disabled in the **App** tab (see [App tab](#app-tab)) or, for the CLI, with `-P/--slimproto false`.
+
+### NetEase Cloud Music (网易云音乐) source
+
+The PC client of NetEase Cloud Music cannot push its audio to a DLNA renderer, and streaming it through
+the normal SWYH path means capturing the sound card and **re-encoding** it. The **NetEase** tab adds a
+second, independent source that avoids that: swyh-rs asks a
+[NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi) server for the *original*
+audio file and relays it to the renderer **byte for byte — no decoding, no re-encoding, no
+sample-rate or bit-depth conversion**. The renderer just gets the MP3/FLAC file NetEase itself serves.
+
+**Prerequisites**
+
+1. Run a NeteaseCloudMusicApi server (it handles NetEase's request signing):
+
+   ```sh
+   git clone https://github.com/Binaryify/NeteaseCloudMusicApi.git
+   cd NeteaseCloudMusicApi && npm install && node app.js
+   ```
+
+   It listens on `http://127.0.0.1:3000` by default, which is also the default in swyh-rs.
+
+2. Optionally paste your NetEase **cookie** (`MUSIC_U=...;`) in the tab. Without it you only get the
+   tiers available to anonymous users (usually 128 kbps); with it you also get 320 kbps / lossless /
+   Hi-Res and your private playlists. You can grab the cookie from the browser devtools on
+   <https://music.163.com> while logged in.
+
+**Using it (GUI)**
+
+- **NetEase** tab → set the API server, cookie and quality.
+- **Search songs**: type a keyword, press *Search*, pick a track.
+- **Playlist id**: paste the id from a playlist URL (`music.163.com/#/playlist?id=<this>`), press *Load*.
+- Pick a renderer (press *Refresh* if the list is empty), then *Play* (from the selected track) or
+  *Play all*. *Next* skips a track, *Stop* ends playback.
+
+**Using it (CLI)**
+
+```sh
+swyh-rs-cli --netease_playlist 24381616 -o 192.168.1.26
+swyh-rs-cli --netease_search "周杰伦 搁浅" --netease_quality lossless -o 192.168.1.26
+```
+
+When a NetEase source is given, the sound-card capture stream is *not* pushed to that renderer — the
+tracks are played one after another instead, and playback advances automatically when a track ends.
+
+**How it works**
+
+- the track id is resolved to a signed CDN URL via `/song/url/v1` (falling back to `/song/url`),
+  cached for 5 minutes because those URLs expire;
+- the renderer is pointed at `http://<swyh-rs>:<port>/netease/<song-id>.<ext>` with a `SetAVTransportURI`
+  (or an OpenHome `Insert`) carrying the real title/artist/duration;
+- our HTTP server fetches that CDN URL and pipes the bytes straight through, forwarding `Range`
+  requests so seeking works.
+
+Note that swyh-rs never touches NetEase's DRM: it can only play what the account you are logged in
+with is entitled to, and tracks without a playable URL are skipped.
 
 ### SSDP and VPN
 

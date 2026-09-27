@@ -39,6 +39,16 @@ pub struct Args {
     pub sample_rate: Option<u32>,
     pub use_dither: Option<bool>,
     pub enable_slimproto: Option<bool>,
+    /// NetEase source: play this playlist id
+    pub netease_playlist: Option<u64>,
+    /// NetEase source: play the first page of matches for this keyword
+    pub netease_search: Option<String>,
+    /// NetEase source: base URL of the NeteaseCloudMusicApi server
+    pub netease_api: Option<String>,
+    /// NetEase source: login cookie (VIP/lossless, private playlists)
+    pub netease_cookie: Option<String>,
+    /// NetEase source: audio quality (standard/exhigh/lossless/hires)
+    pub netease_quality: Option<String>,
 }
 
 impl Args {
@@ -70,6 +80,11 @@ Recognized options:
     -R (--sample_rate) u32 : sample rate (44100/48000/88200/96000/176400/192000/352800/384000) [configured/44100]
     -d (--dither) bool : use TPDF dither for 16-bit output [true]
     -P (--slimproto) bool : enable SlimProto/squeezelite support [config: enable_slimproto, default true]
+    --netease_playlist u64 : play this NetEase playlist instead of the captured audio
+    --netease_search string : play the NetEase search results for this keyword
+    --netease_api string : base URL of the NeteaseCloudMusicApi server [http://127.0.0.1:3000]
+    --netease_cookie string : NetEase login cookie (VIP/lossless, private playlists)
+    --netease_quality string : NetEase quality (standard/exhigh/lossless/hires) [lossless]
 "#
         );
         println!("{self:?}");
@@ -304,6 +319,36 @@ Recognized options:
                         }
                     } else {
                         self.enable_slimproto = Some(true);
+                    }
+                }
+                Long("netease_playlist") => {
+                    if let Ok(v) = argparser.value() {
+                        match v.string().unwrap_or_default().trim().parse::<u64>() {
+                            Ok(id) => self.netease_playlist = Some(id),
+                            Err(x) => {
+                                errors.push(format!("Invalid NetEase playlist id: {x}."));
+                            }
+                        }
+                    }
+                }
+                Long("netease_search") => {
+                    if let Ok(v) = argparser.value() {
+                        self.netease_search = Some(v.string().unwrap_or_default());
+                    }
+                }
+                Long("netease_api") => {
+                    if let Ok(v) = argparser.value() {
+                        self.netease_api = Some(v.string().unwrap_or_default());
+                    }
+                }
+                Long("netease_cookie") => {
+                    if let Ok(v) = argparser.value() {
+                        self.netease_cookie = Some(v.string().unwrap_or_default());
+                    }
+                }
+                Long("netease_quality") => {
+                    if let Ok(v) = argparser.value() {
+                        self.netease_quality = Some(v.string().unwrap_or_default());
                     }
                 }
                 _ => (),

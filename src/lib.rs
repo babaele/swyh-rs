@@ -6,6 +6,7 @@
 pub mod audio;
 pub mod enums;
 pub mod globals;
+pub mod netease;
 pub mod rendercontrol;
 pub mod server;
 pub mod slimproto;

@@ -4,6 +4,7 @@
 use crate::{
     enums::streaming::{StreamSize, StreamingFormat},
     globals::statics::{DEFAULT_COLOR_THEME, DEFAULT_WIDGET_SCHEME, SERVER_PORT, STYLES, THEMES},
+    netease::Quality,
     utils::i18n::available_languages,
 };
 use anyhow::{Context, Result};
@@ -80,6 +81,12 @@ impl CfgDefaults {
     }
     fn use_dither() -> Option<bool> {
         Some(true)
+    }
+    fn netease_api_base() -> Option<String> {
+        Some(crate::netease::api::DEFAULT_API_BASE.to_string())
+    }
+    fn netease_quality() -> Option<Quality> {
+        Some(Quality::default())
     }
 }
 
@@ -167,6 +174,17 @@ pub struct Configuration {
     pub sample_rate: Option<u32>,
     #[serde(alias = "UseDither", default = "CfgDefaults::use_dither")]
     pub use_dither: Option<bool>,
+    // added for the NetEase Cloud Music source
+    /// base URL of the `NeteaseCloudMusicApi` server used by the NetEase source
+    #[serde(alias = "NeteaseApiBase", default = "CfgDefaults::netease_api_base")]
+    pub netease_api_base: Option<String>,
+    /// NetEase login cookie (`MUSIC_U=...;`), needed for VIP/lossless tracks
+    /// and for private playlists
+    #[serde(alias = "NeteaseCookie", default)]
+    pub netease_cookie: Option<String>,
+    /// requested audio quality for the NetEase source
+    #[serde(alias = "NeteaseQuality", default = "CfgDefaults::netease_quality")]
+    pub netease_quality: Option<Quality>,
 }
 
 impl Default for Configuration {
@@ -212,6 +230,9 @@ impl Configuration {
             language: Some(detect_default_language()),
             sample_rate: None,
             use_dither: Some(true),
+            netease_api_base: CfgDefaults::netease_api_base(),
+            netease_cookie: None,
+            netease_quality: CfgDefaults::netease_quality(),
         }
     }
 

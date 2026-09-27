@@ -1761,6 +1761,7 @@ dependencies = [
  "mimalloc",
  "rustix",
  "serde",
+ "serde_json",
  "simplelog",
  "socket2",
  "sys-locale",

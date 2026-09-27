@@ -10,6 +10,7 @@ use std::{
     fs::File,
     net::IpAddr,
     path::Path,
+    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -42,6 +43,7 @@ use swyh_rs::{
         get_msgchannel, get_renderers, get_renderers_mut, get_slim_renderers,
         get_slim_renderers_mut, stop_clients_by_ip,
     },
+    netease::{NeteaseClient, Quality, Track, start_netease_queue},
     rendercontrol::{Renderer, StreamInfo, WavData, discover, new_agent},
     server::streaming_server::run_server,
     utils::{
@@ -122,6 +124,23 @@ fn main() -> Result<(), i32> {
     config.inject_silence = args.inject_silence.or(config.inject_silence);
     config.use_dither = args.use_dither.or(config.use_dither);
     config.enable_slimproto = args.enable_slimproto.unwrap_or(config.enable_slimproto);
+    // NetEase source settings from the command line
+    if let Some(api) = args.netease_api.clone() {
+        config.netease_api_base = Some(api);
+    }
+    if let Some(cookie) = args.netease_cookie.clone() {
+        config.netease_cookie = Some(cookie);
+    }
+    if let Some(quality) = args.netease_quality.as_deref() {
+        match Quality::from_str(quality) {
+            Ok(q) => config.netease_quality = Some(q),
+            Err(()) => {
+                eprintln!("Invalid NetEase quality: {quality}");
+                args.usage();
+                return Err(1);
+            }
+        }
+    }
 
     let mut audio_output_device =
         select_audio_source_cli(&mut args, &mut config, audio_output_device_opt)
@@ -259,9 +278,53 @@ fn main() -> Result<(), i32> {
     // prepare for playing
     let streaminfo = StreamInfo::new(wd.sample_rate);
 
+    // NetEase source: resolve the tracks up front, they are pushed to the
+    // renderer as-is (no capture, no transcoding) instead of the audio device
+    let netease_tracks: Option<Vec<Track>> = if let Some(id) = args.netease_playlist {
+        match NeteaseClient::from_config().playlist_tracks(id) {
+            Ok(tracks) => Some(tracks),
+            Err(e) => {
+                ui_log(
+                    LogCategory::Error,
+                    &format!("NetEase: playlist {id}: {e:#}"),
+                );
+                None
+            }
+        }
+    } else if let Some(keywords) = args.netease_search.as_deref() {
+        match NeteaseClient::from_config().search(keywords, 50) {
+            Ok(tracks) => Some(tracks),
+            Err(e) => {
+                ui_log(
+                    LogCategory::Error,
+                    &format!("NetEase: search {keywords}: {e:#}"),
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // start playing unless only serving
     let mut playing = Vec::new();
-    if serve_only {
+    if let Some(tracks) = netease_tracks {
+        let port = config.server_port.unwrap_or(SERVER_PORT);
+        match player.as_ref() {
+            Some(pl) => {
+                ui_log(
+                    LogCategory::Info,
+                    &format!(
+                        "NetEase: playing {} track(s) on {} (no transcoding)",
+                        tracks.len(),
+                        pl.controller.dev_name
+                    ),
+                );
+                start_netease_queue(pl, local_addr, port, tracks, 0);
+            }
+            None => ui_log(LogCategory::Error, "NetEase: no renderer selected"),
+        }
+    } else if serve_only {
         let port = config.server_port.unwrap_or(SERVER_PORT);
         ui_log(
             LogCategory::Info,

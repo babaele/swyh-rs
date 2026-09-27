@@ -4,7 +4,9 @@
 
 #[cfg(feature = "gui")]
 use super::types::RendUI;
-use super::types::{Controller, Renderer, StreamInfo, SupportedProtocols};
+use super::types::{
+    Controller, PositionInfo, Renderer, StreamInfo, SupportedProtocols, UriPlayInfo,
+};
 use crate::{
     enums::{
         messages::MessageType,
@@ -85,6 +87,34 @@ duration=\"{duration}\" >{server_uri}</res>\
 <upnp:class>object.item.audioItem.musicTrack</upnp:class>\
 </item>\
 </DIDL-Lite>";
+
+/// didl metadata template for a plain (already encoded) URI, e.g. a NetEase
+/// track relayed by our HTTP server: no sample rate/bit depth to announce, but
+/// the real title/artist/duration instead
+static DIDL_URI_TEMPLATE: &str = "\
+<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" \
+xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
+xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\">\
+<item id=\"1\" parentID=\"0\" restricted=\"0\">\
+<dc:title>{title}</dc:title>\
+<upnp:artist>{artist}</upnp:artist>\
+<upnp:album>{album}</upnp:album>\
+<res duration=\"{duration}\" protocolInfo=\"{didl_prot_info}\">{server_uri}</res>\
+<upnp:class>object.item.audioItem.musicTrack</upnp:class>\
+</item>\
+</DIDL-Lite>";
+
+/// AV `GetPositionInfo` template, used to detect the end of a pushed track
+static AV_GET_POSITION_TEMPLATE: &str = "\
+<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<s:Envelope s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\" \
+xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">\
+<s:Body>\
+<u:GetPositionInfo xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">\
+<InstanceID>0</InstanceID>\
+</u:GetPositionInfo>\
+</s:Body>\
+</s:Envelope>";
 
 /// OH play playlist template
 static OH_PLAY_PL_TEMPLATE: &str = "\
@@ -184,6 +214,15 @@ xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">\
 /// Bad XML template error
 static BAD_TEMPL: &str = "Error parsing/formatting XML template.";
 
+/// Parse a UPnP `H:MM:SS[.fff]` / `HH:MM:SS` duration into seconds.
+fn parse_hms(s: &str) -> Option<f64> {
+    let mut parts = s.trim().split(':');
+    let h: f64 = parts.next()?.parse().ok()?;
+    let m: f64 = parts.next()?.parse().ok()?;
+    let s: f64 = parts.next()?.parse().ok()?;
+    Some(h * 3600.0 + m * 60.0 + s)
+}
+
 /// Compiled figura templates, shared across threads.
 /// `Template` is `Send + Sync` as of figura 3.0, so these can live in one
 /// process-wide static instead of being recompiled per thread-local.
@@ -193,6 +232,7 @@ struct CompiledTemplates {
     l16_prot: CbTemplate,
     l24_prot: CbTemplate,
     didl: CbTemplate,
+    didl_uri: CbTemplate,
     oh_insert_pl: CbTemplate,
     av_set_transport_uri: CbTemplate,
 }
@@ -211,6 +251,8 @@ static TEMPLATES: LazyLock<CompiledTemplates> = LazyLock::new(|| {
             .expect("static L24 prot info template is invalid"),
         didl: CbTemplate::compile(htmlescape::encode_minimal(DIDL_TEMPLATE))
             .expect("static DIDL template is invalid"),
+        didl_uri: CbTemplate::compile(htmlescape::encode_minimal(DIDL_URI_TEMPLATE))
+            .expect("static DIDL uri template is invalid"),
         oh_insert_pl: CbTemplate::compile(OH_INSERT_PL_TEMPLATE)
             .expect("static OH insert playlist template is invalid"),
         av_set_transport_uri: CbTemplate::compile(AV_SET_TRANSPORT_URI_TEMPLATE)
@@ -569,6 +611,76 @@ impl Controller {
         }
     }
 
+    /// Play a plain URI (not the captured audio stream) on this renderer.
+    ///
+    /// Used for sources that already are audio files, e.g. a NetEase Cloud
+    /// Music track relayed by our own HTTP server (see `netease::proxy`). The
+    /// file is handed to the renderer as-is, so nothing is transcoded.
+    pub fn play_uri(&self, info: &UriPlayInfo) -> Result<(), &'static str> {
+        // do we support this protocol?
+        if !self.supported_protocols.is_valid() {
+            ui_log(
+                LogCategory::Error,
+                "play_uri: no supported renderer protocol found",
+            );
+            return Err("Invalid UPNP/DLNA protocol");
+        }
+        let mut fmt_vars = Context::default();
+        fmt_vars.insert("server_uri", Value::owned_str(info.uri.clone()));
+        // the DIDL is embedded in a SOAP body, so every value needs escaping
+        fmt_vars.insert(
+            "title",
+            Value::owned_str(htmlescape::encode_minimal(&info.title)),
+        );
+        fmt_vars.insert(
+            "artist",
+            Value::owned_str(htmlescape::encode_minimal(&info.artist)),
+        );
+        fmt_vars.insert(
+            "album",
+            Value::owned_str(htmlescape::encode_minimal(&info.album)),
+        );
+        fmt_vars.insert("duration", Value::owned_str(info.duration.clone()));
+        // a generic protocolInfo: the payload is a plain seekable file, so we
+        // neither claim a DLNA profile nor deny seeking (`DLNA.ORG_OP`)
+        fmt_vars.insert(
+            "didl_prot_info",
+            Value::owned_str(htmlescape::encode_minimal(&format!(
+                "http-get:*:{}:*",
+                info.mime
+            ))),
+        );
+        let Ok(formatted_didl) = TEMPLATES.didl_uri.format(&fmt_vars).inspect_err(|e| {
+            ui_log(
+                LogCategory::Error,
+                &format!("Error {e} formatting didl_data xml for {}", info.uri),
+            );
+        }) else {
+            return Err(BAD_TEMPL);
+        };
+        fmt_vars.insert("didl_data", Value::owned_str(formatted_didl));
+        // now send the start playing commands, exactly like `play()`
+        if self.supported_protocols.openhome {
+            ui_log(
+                LogCategory::Info,
+                &format!(
+                    "OH Start playing \"{}\" on {} host={} port={}",
+                    info.title, self.dev_name, self.host, self.port
+                ),
+            );
+            self.oh_play(&fmt_vars)
+        } else {
+            ui_log(
+                LogCategory::Info,
+                &format!(
+                    "AV Start playing \"{}\" on {} host={} port={}",
+                    info.title, self.dev_name, self.host, self.port
+                ),
+            );
+            self.av_play(&fmt_vars)
+        }
+    }
+
     /// `oh_play` - set up a playlist on this `OpenHome` renderer and tell it to play it
     ///
     /// the renderer will then try to get the audio from our built-in webserver
@@ -661,7 +773,7 @@ impl Controller {
     }
 
     /// `stop_play` - stop playing on this renderer (`OpenHome` or `AvTransport`)
-    fn stop_play(&self) {
+    pub fn stop_play(&self) {
         if self.supported_protocols.openhome {
             self.oh_stop_play(&self.oh_control_full_url);
         } else if self.supported_protocols.avtransport {
@@ -712,6 +824,53 @@ impl Controller {
             AV_STOP_PLAY_TEMPLATE,
         )
         .unwrap_or_default();
+    }
+
+    /// Where the renderer currently is in the track it is playing.
+    ///
+    /// Only `AVTransport` renderers expose `GetPositionInfo`; OpenHome uses a
+    /// different (`Time`) service, so `None` is returned for them and callers
+    /// fall back to wall-clock timing. `None` is also returned when the SOAP
+    /// call fails or the renderer reports `NOT_IMPLEMENTED`.
+    pub fn position_info(&self) -> Option<PositionInfo> {
+        if !self.supported_protocols.avtransport {
+            return None;
+        }
+        let xml = soap_request(
+            &self.agent,
+            &self.av_control_full_url,
+            "urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo",
+            AV_GET_POSITION_TEMPLATE,
+        )?;
+        debug!("av_get_position_info response: {xml}");
+        let parser = EventReader::new(xml.as_bytes());
+        let mut cur_elem = EcoString::new();
+        let mut rel_time = String::new();
+        let mut track_duration = String::new();
+        let mut transport_state = String::new();
+        for e in parser {
+            match e {
+                Ok(XmlEvent::StartElement { name, .. }) => {
+                    cur_elem = EcoString::from(name.local_name);
+                }
+                Ok(XmlEvent::Characters(value)) => match cur_elem.as_str() {
+                    "RelTime" => rel_time = value,
+                    "TrackDuration" => track_duration = value,
+                    "TransportState" => transport_state = value,
+                    _ => {}
+                },
+                Err(e) => error!("AV GetPositionInfo XML parse error: {e}"),
+                _ => {}
+            }
+        }
+        if rel_time.is_empty() && track_duration.is_empty() {
+            return None;
+        }
+        Some(PositionInfo {
+            rel_time: parse_hms(&rel_time).unwrap_or(0.0),
+            track_duration: parse_hms(&track_duration).unwrap_or(0.0),
+            transport_state,
+        })
     }
 
     /// get volume, using Openhome if present, else `AvTransport` (if present)

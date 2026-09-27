@@ -39,6 +39,30 @@ tab-audio = Audio
 tab-network = Network
 tab-app = App
 tab-status = Status
+tab-netease = NetEase
+
+# NetEase Cloud Music
+netease-api-label = API server:
+netease-cookie-label = Cookie (optional):
+netease-quality-label = Quality:
+netease-search-label = Search songs:
+netease-playlist-label = Playlist id:
+netease-renderer-label = Renderer:
+btn-netease-search = Search
+btn-netease-load = Load
+btn-netease-refresh = Refresh
+btn-netease-play = Play
+btn-netease-playall = Play all
+btn-netease-next = Next
+btn-netease-stop = Stop
+netease-api-changed = NetEase API server changed to { $url }
+netease-cookie-changed = NetEase cookie updated
+netease-quality-changed = NetEase quality changed to { $quality }
+netease-search-result = Search "{ $keywords }" found { $count } songs
+netease-playlist-loaded = Playlist { $id } loaded, { $count } songs
+netease-bad-playlist = Invalid playlist id: { $id }
+netease-no-track = NetEase: nothing to play - search or load a playlist first
+netease-no-renderer = NetEase: no renderer available - discover and select one first
 
 # Status messages
 status-setup-audio = Setup audio sources

@@ -25,3 +25,5 @@ deploy/flatpak/build.log
 # no exe or zip files
 *.exe
 *.zip
+build_gui.log
+.workbuddy/

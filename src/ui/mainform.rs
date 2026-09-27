@@ -12,9 +12,13 @@ use crate::{
     },
     fl,
     globals::statics::{
-        APP_DATE, APP_VERSION, NSTYLES, NTHEMES, RUN_RMS_MONITOR, SAMPLE_RATES, STYLES, THEMES,
-        get_config, get_config_mut, get_renderers, get_renderers_mut, get_slim_renderers,
-        get_slim_renderers_mut,
+        APP_DATE, APP_VERSION, NSTYLES, NTHEMES, RUN_RMS_MONITOR, SAMPLE_RATES, SERVER_PORT,
+        STYLES, THEMES, get_config, get_config_mut, get_renderers, get_renderers_mut,
+        get_slim_renderers, get_slim_renderers_mut,
+    },
+    netease::{
+        NeteaseClient, Quality, Track, api::DEFAULT_API_BASE, netease_next, netease_stop,
+        start_netease_queue,
     },
     rendercontrol::{Renderer, StreamInfo, WavData},
     slimproto::types::SlimRenderer,
@@ -22,12 +26,13 @@ use crate::{
 };
 use fltk::{
     app,
+    browser::HoldBrowser,
     button::{Button, CheckButton, LightButton},
     enums::{self, Align, Color, Event, FrameType},
     frame::Frame,
     group::{Flex, FlexType, Group, Pack, PackType, Tabs},
     image::SvgImage,
-    input::IntInput,
+    input::{Input, IntInput},
     menu::Choice,
     misc::Progress,
     prelude::*,
@@ -40,7 +45,14 @@ use log::{LevelFilter, debug, info};
 
 use fltk_theme::{ColorMap, ColorTheme, SchemeType, WidgetScheme, color_themes};
 
-use std::{cell::Cell, fmt::Write as _, net::IpAddr, rc::Rc, str::FromStr, sync::atomic::Ordering};
+use std::{
+    cell::{Cell, RefCell},
+    fmt::Write as _,
+    net::IpAddr,
+    rc::Rc,
+    str::FromStr,
+    sync::atomic::Ordering,
+};
 
 /// fltk themes
 struct ThemeDesc {
@@ -1093,6 +1105,373 @@ impl StatusTab {
     }
 }
 
+/// Adds a `label: widget: button` row (fixed-width label and button, flexed
+/// widget) to `col`, for the NetEase tab's search/playlist/renderer rows.
+fn add_row_with_button(
+    col: &mut Flex,
+    label: &str,
+    label_w: i32,
+    button_w: i32,
+    widget: &impl WidgetExt,
+    button: &impl WidgetExt,
+) {
+    let lbl = Frame::default().with_label(label);
+    let mut row = Flex::new(0, 0, GW, ROW_H, "");
+    row.set_spacing(5);
+    row.set_type(FlexType::Row);
+    row.end();
+    row.add(&lbl);
+    row.fixed(&lbl, label_w);
+    row.add(widget);
+    row.add(button);
+    row.fixed(button, button_w);
+    col.add(&row);
+    col.fixed(&row, ROW_H);
+}
+
+/// Adds a row of evenly sized buttons to `col`.
+fn add_button_row(col: &mut Flex, buttons: &[&impl WidgetExt]) {
+    let mut row = Flex::new(0, 0, GW, ROW_H, "");
+    row.set_spacing(5);
+    row.set_type(FlexType::Row);
+    row.end();
+    for b in buttons {
+        row.add(*b);
+    }
+    col.add(&row);
+    col.fixed(&row, ROW_H);
+}
+
+/// (Re)fill the NetEase tab's renderer `Choice` from the discovered renderers,
+/// keeping `addrs` in sync so the choice index maps back to a `remote_addr`.
+fn refresh_netease_renderers(choice: &mut Choice, addrs: &Rc<RefCell<Vec<String>>>) {
+    let renderers = get_renderers();
+    choice.clear();
+    addrs.borrow_mut().clear();
+    for r in renderers.iter() {
+        choice.add_choice(&format!(
+            "{} ({})",
+            r.controller.dev_name, r.controller.remote_addr
+        ));
+        addrs
+            .borrow_mut()
+            .push(r.controller.remote_addr.to_string());
+    }
+    if !addrs.borrow().is_empty() {
+        choice.set_value(0);
+    }
+}
+
+/// Push `tracks` (starting at `start_index`) to the renderer currently selected
+/// in `choice`, playing them one after another without transcoding.
+fn netease_play(
+    tracks: &Rc<RefCell<Vec<Track>>>,
+    start_index: usize,
+    choice: &mut Choice,
+    addrs: &Rc<RefCell<Vec<String>>>,
+    local_addr: IpAddr,
+    server_port: u16,
+) {
+    let list = tracks.borrow().clone();
+    if list.is_empty() {
+        ui_log(LogCategory::Warning, &fl!("netease-no-track"));
+        return;
+    }
+    // read the flag out first: `refresh_netease_renderers` borrows `addrs` mutably
+    let no_renderers_yet = addrs.borrow().is_empty();
+    if no_renderers_yet {
+        refresh_netease_renderers(choice, addrs);
+    }
+    let Some(addr) = addrs.borrow().get(choice.value() as usize).cloned() else {
+        ui_log(LogCategory::Error, &fl!("netease-no-renderer"));
+        return;
+    };
+    // clone the renderer out and release the lock before touching the network
+    let Some(renderer) = get_renderers()
+        .iter()
+        .find(|r| r.controller.remote_addr == addr)
+        .cloned()
+    else {
+        ui_log(LogCategory::Error, &fl!("netease-no-renderer"));
+        return;
+    };
+    start_netease_queue(
+        &renderer,
+        local_addr,
+        server_port,
+        list,
+        start_index,
+    );
+}
+
+/// NetEase tab: search/load tracks and push them to a renderer unmodified.
+///
+/// The audio itself is relayed by `crate::netease::proxy`, which pipes the
+/// original NetEase file through byte for byte — no re-encoding.
+struct NeteaseTab {
+    group: Group,
+}
+
+impl NeteaseTab {
+    fn new(ctx: &TabCtx, local_addr: IpAddr) -> NeteaseTab {
+        let config = ctx.config;
+        let server_port = config.server_port.unwrap_or(SERVER_PORT);
+
+        let mut group = Group::new(0, TAB_BAR_H, GW, INNER_H, "");
+        group.set_label(&fl!("tab-netease"));
+        group.end();
+        let mut col = Flex::new(0, TAB_BAR_H, GW, INNER_H, "");
+        col.set_type(FlexType::Column);
+        col.set_spacing(ROW_SPACING);
+        col.set_margin(MARGIN);
+        col.end();
+
+        // base url of the NeteaseCloudMusicApi server
+        let mut api_base = Input::new(0, 0, 0, ROW_H, "");
+        api_base.set_value(
+            &config
+                .netease_api_base
+                .clone()
+                .unwrap_or_else(|| DEFAULT_API_BASE.to_string()),
+        );
+        api_base.set_callback(move |b| {
+            let value = b.value().trim().to_string();
+            if get_config().netease_api_base.as_deref() == Some(value.as_str()) {
+                return;
+            }
+            {
+                let mut conf = get_config_mut();
+                conf.netease_api_base = Some(value.clone());
+                let _ = conf.update_config();
+            }
+            ui_log(
+                LogCategory::Info,
+                &fl!("netease-api-changed", "url" = &value),
+            );
+        });
+        add_labeled_row(&mut col, &fl!("netease-api-label"), LABEL_W_NET, &api_base);
+
+        // login cookie (optional, needed for VIP/lossless and private lists)
+        let mut cookie = Input::new(0, 0, 0, ROW_H, "");
+        cookie.set_value(config.netease_cookie.as_deref().unwrap_or_default());
+        cookie.set_callback(move |b| {
+            let value = b.value().trim().to_string();
+            if get_config().netease_cookie.as_deref() == Some(value.as_str()) {
+                return;
+            }
+            {
+                let mut conf = get_config_mut();
+                conf.netease_cookie = if value.is_empty() { None } else { Some(value) };
+                let _ = conf.update_config();
+            }
+            ui_log(LogCategory::Info, &fl!("netease-cookie-changed"));
+        });
+        add_labeled_row(&mut col, &fl!("netease-cookie-label"), LABEL_W_NET, &cookie);
+
+        // audio quality
+        let qualities = Quality::ALL;
+        let current_quality = config.netease_quality.unwrap_or_default();
+        let quality_idx = qualities
+            .iter()
+            .position(|q| *q == current_quality)
+            .unwrap_or(0) as i32;
+        let mut quality_choice = Choice::new(0, 0, 0, ROW_H, "");
+        for q in qualities {
+            quality_choice.add_choice(q.as_str());
+        }
+        quality_choice.set_value(quality_idx);
+        quality_choice.set_callback(move |b| {
+            let Some(text) = b.choice() else {
+                return;
+            };
+            let quality = Quality::from_str(&text).unwrap_or_default();
+            if get_config().netease_quality == Some(quality) {
+                return;
+            }
+            {
+                let mut conf = get_config_mut();
+                conf.netease_quality = Some(quality);
+                let _ = conf.update_config();
+            }
+            ui_log(
+                LogCategory::Info,
+                &fl!("netease-quality-changed", "quality" = quality.as_str()),
+            );
+        });
+        add_labeled_row(
+            &mut col,
+            &fl!("netease-quality-label"),
+            LABEL_W_NET,
+            &quality_choice,
+        );
+
+        // the tracks found by the last search / playlist load.
+        // The browser is created here (not where it is added to the column)
+        // so the search/load callbacks can capture a clone of it.
+        let tracks: Rc<RefCell<Vec<Track>>> = Rc::new(RefCell::new(Vec::new()));
+        let renderer_addrs: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let mut browser = HoldBrowser::new(0, 0, 0, 0, "");
+
+        // search by keyword
+        let mut search_input = Input::new(0, 0, 0, ROW_H, "");
+        let mut search_btn = Button::new(0, 0, 0, ROW_H, "");
+        search_btn.set_label(&fl!("btn-netease-search"));
+        search_btn.set_callback({
+            let mut browser = browser.clone();
+            let tracks = tracks.clone();
+            let mut search_input = search_input.clone();
+            move |_| {
+                let keywords = search_input.value().trim().to_string();
+                if keywords.is_empty() {
+                    return;
+                }
+                let client = NeteaseClient::from_config();
+                match client.search(&keywords, 50) {
+                    Ok(found) => {
+                        ui_log(
+                            LogCategory::Info,
+                            &fl!(
+                                "netease-search-result",
+                                "count" = found.len(),
+                                "keywords" = &keywords
+                            ),
+                        );
+                        *tracks.borrow_mut() = Vec::new();
+                        browser.clear();
+                        for t in &found {
+                            browser.add(&format!("{} - {}", t.name, t.artist));
+                        }
+                        *tracks.borrow_mut() = found;
+                    }
+                    Err(e) => ui_log(LogCategory::Error, &format!("NetEase: {keywords}: {e:#}")),
+                }
+            }
+        });
+        add_row_with_button(
+            &mut col,
+            &fl!("netease-search-label"),
+            LABEL_W_NET,
+            80,
+            &search_input,
+            &search_btn,
+        );
+
+        // load a playlist by id
+        let mut playlist_input = Input::new(0, 0, 0, ROW_H, "");
+        let mut load_btn = Button::new(0, 0, 0, ROW_H, "");
+        load_btn.set_label(&fl!("btn-netease-load"));
+        load_btn.set_callback({
+            let mut browser = browser.clone();
+            let tracks = tracks.clone();
+            let mut playlist_input = playlist_input.clone();
+            move |_| {
+                let text = playlist_input.value().trim().to_string();
+                let Ok(id) = text.parse::<u64>() else {
+                    ui_log(
+                        LogCategory::Error,
+                        &fl!("netease-bad-playlist", "id" = &text),
+                    );
+                    return;
+                };
+                let client = NeteaseClient::from_config();
+                match client.playlist_tracks(id) {
+                    Ok(found) => {
+                        ui_log(
+                            LogCategory::Info,
+                            &fl!("netease-playlist-loaded", "count" = found.len(), "id" = id),
+                        );
+                        browser.clear();
+                        for t in &found {
+                            browser.add(&format!("{} - {}", t.name, t.artist));
+                        }
+                        *tracks.borrow_mut() = found;
+                    }
+                    Err(e) => ui_log(LogCategory::Error, &format!("NetEase: {id}: {e:#}")),
+                }
+            }
+        });
+        add_row_with_button(
+            &mut col,
+            &fl!("netease-playlist-label"),
+            LABEL_W_NET,
+            80,
+            &playlist_input,
+            &load_btn,
+        );
+
+        // the track list itself (created above, so the search/load callbacks
+        // can already refer to it); double-clicking a row plays from that track
+        col.add(&browser);
+
+        // renderer selection
+        let mut renderer_choice = Choice::new(0, 0, 0, ROW_H, "");
+        let mut refresh_btn = Button::new(0, 0, 0, ROW_H, "");
+        refresh_btn.set_label(&fl!("btn-netease-refresh"));
+        refresh_btn.set_callback({
+            let mut renderer_choice = renderer_choice.clone();
+            let addrs = renderer_addrs.clone();
+            move |_| refresh_netease_renderers(&mut renderer_choice, &addrs)
+        });
+        add_row_with_button(
+            &mut col,
+            &fl!("netease-renderer-label"),
+            LABEL_W_NET,
+            80,
+            &renderer_choice,
+            &refresh_btn,
+        );
+
+        // transport buttons
+        let mut play_btn = Button::new(0, 0, 0, ROW_H, "");
+        play_btn.set_label(&fl!("btn-netease-play"));
+        play_btn.set_callback({
+            let tracks = tracks.clone();
+            let addrs = renderer_addrs.clone();
+            let mut renderer_choice = renderer_choice.clone();
+            let mut browser = browser.clone();
+            move |_| {
+                let start = (browser.value() - 1).max(0) as usize;
+                netease_play(
+                    &tracks,
+                    start,
+                    &mut renderer_choice,
+                    &addrs,
+                    local_addr,
+                    server_port,
+                );
+            }
+        });
+        let mut play_all_btn = Button::new(0, 0, 0, ROW_H, "");
+        play_all_btn.set_label(&fl!("btn-netease-playall"));
+        play_all_btn.set_callback({
+            let tracks = tracks.clone();
+            let addrs = renderer_addrs.clone();
+            let mut renderer_choice = renderer_choice.clone();
+            move |_| {
+                netease_play(
+                    &tracks,
+                    0,
+                    &mut renderer_choice,
+                    &addrs,
+                    local_addr,
+                    server_port,
+                );
+            }
+        });
+        let mut next_btn = Button::new(0, 0, 0, ROW_H, "");
+        next_btn.set_label(&fl!("btn-netease-next"));
+        next_btn.set_callback(move |_| netease_next());
+        let mut stop_btn = Button::new(0, 0, 0, ROW_H, "");
+        stop_btn.set_label(&fl!("btn-netease-stop"));
+        stop_btn.set_callback(move |_| netease_stop());
+        add_button_row(&mut col, &[&play_btn, &play_all_btn, &next_btn, &stop_btn]);
+
+        group.add(&col);
+
+        NeteaseTab { group }
+    }
+}
+
 /// compute optimum height for the feedback log box on windows resize
 fn feedback_target_height(window_h: i32, feedback_y: i32) -> i32 {
     (window_h - feedback_y).max(MIN_FEEDBACK_H)
@@ -1177,6 +1556,9 @@ impl MainForm {
 
         let status_tab = StatusTab::new(&ctx);
         tabs.add(&status_tab.group);
+
+        let netease_tab = NeteaseTab::new(&ctx, local_addr);
+        tabs.add(&netease_tab.group);
 
         tabs.end();
         vpack.add(&tabs);

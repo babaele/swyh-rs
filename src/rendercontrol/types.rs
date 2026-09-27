@@ -43,6 +43,35 @@ impl StreamInfo {
     }
 }
 
+/// Metadata for pushing a plain URI (not the captured audio) to a renderer —
+/// e.g. a NetEase Cloud Music track relayed by the built-in HTTP server.
+///
+/// Unlike [`StreamInfo`] this carries no sample rate or bit depth: the payload
+/// is a self-describing audio file that is relayed byte for byte.
+#[derive(Debug, Clone)]
+pub struct UriPlayInfo {
+    /// absolute URL the renderer should fetch
+    pub uri: String,
+    /// MIME type served at `uri` (e.g. `audio/flac`)
+    pub mime: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    /// `H:MM:SS`, as expected by DIDL-Lite `res@duration`
+    pub duration: String,
+}
+
+/// A renderer's `GetPositionInfo` reply, used to detect the end of a track.
+#[derive(Debug, Clone)]
+pub struct PositionInfo {
+    /// seconds into the current track (`RelTime`)
+    pub rel_time: f64,
+    /// length of the current track in seconds (`TrackDuration`)
+    pub track_duration: f64,
+    /// `TransportState`, e.g. `PLAYING`, `STOPPED`, `TRANSITIONING`
+    pub transport_state: String,
+}
+
 /// An UPNP/DLNA service desciption
 #[derive(Debug, Clone)]
 pub struct AvService {

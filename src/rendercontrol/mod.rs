@@ -16,4 +16,7 @@ pub use control::PlayOutcome;
 pub use discovery::{discover, new_agent};
 #[cfg(feature = "gui")]
 pub use types::RendUI;
-pub use types::{AvService, Renderer, StreamInfo, SupportedProtocols, WavData};
+pub use types::{
+    AvService, Controller, PositionInfo, Renderer, StreamInfo, SupportedProtocols, UriPlayInfo,
+    WavData,
+};
