@@ -1472,7 +1472,8 @@ impl NeteaseTab {
         qr_status.set_align(Align::Center);
         qr_col.add(&qr_status);
         qr_col.fixed(&qr_status, ROW_H);
-        let qr_refresh_btn = Button::new(0, 0, 120, ROW_H, "");
+        let mut qr_refresh_btn = Button::new(0, 0, 120, ROW_H, "");
+        qr_refresh_btn.set_label(&fl!("btn-netease-login"));
         // wrap refresh button in a centred Flex row
         let mut qr_btn_row = Flex::new(0, 0, 260, ROW_H, "");
         qr_btn_row.set_type(FlexType::Row);
@@ -1521,12 +1522,17 @@ impl NeteaseTab {
                 start_qr_login_session(&mut qr_window, &mut qr_status, &qr_png);
             }
         });
-        // QR popup close: cancel any in-flight worker
+        // QR popup close: cancel any in-flight worker AND hide the window so the
+        // user can actually dismiss it (FLTK only auto-closes the window
+        // when the callback returns true; returning nothing keeps it open,
+        // and we also want to cancel the worker before hiding).
         tab.qr_window.set_callback({
+            let mut qr_window_for_close = tab.qr_window.clone();
             move |_| {
                 if let Some(flag) = QR_CANCEL.lock().unwrap().take() {
                     flag.store(true, Ordering::Relaxed);
                 }
+                qr_window_for_close.hide();
             }
         });
         // Logout: clear cookie + reset visible widgets
@@ -1626,19 +1632,46 @@ impl NeteaseTab {
     #[allow(clippy::too_many_lines)]
     pub fn handle_event(&mut self, ev: NeteaseEvent) {
         match ev {
-            NeteaseEvent::QrImageReady { png_bytes } => match PngImage::from_data(&png_bytes) {
-                Ok(img) => {
-                    *self.qr_png.borrow_mut() = Some(img);
-                    if let Some(img_ref) = self.qr_png.borrow().as_ref() {
-                        self.qr_image_frame.set_image(Some(img_ref.clone()));
+            NeteaseEvent::QrImageReady { png_bytes } => {
+                ui_log(
+                    LogCategory::Info,
+                    &format!(
+                        "NetEase: QR image received, {} bytes, decoding PNG…",
+                        png_bytes.len()
+                    ),
+                );
+                match PngImage::from_data(&png_bytes) {
+                    Ok(img) => {
+                        ui_log(
+                            LogCategory::Info,
+                            &format!(
+                                "NetEase: QR PNG decoded, {}x{}, drawing into popup",
+                                img.width(),
+                                img.height()
+                            ),
+                        );
+                        *self.qr_png.borrow_mut() = Some(img);
+                        let qr_png_clone = {
+                            let borrow = self.qr_png.borrow();
+                            borrow.as_ref().map(|i| i.clone())
+                        };
+                        if let Some(img) = qr_png_clone {
+                            self.qr_image_frame.set_image(Some(img));
+                            self.qr_image_frame.redraw();
+                        }
+                        self.qr_window.show();
+                        self.qr_window.redraw();
+                        self.qr_status.set_label(&fl!("netease-qr-status-waiting"));
                     }
-                    self.qr_window.show();
-                    self.qr_status.set_label(&fl!("netease-qr-status-waiting"));
+                    Err(e) => {
+                        ui_log(
+                            LogCategory::Error,
+                            &format!("NetEase: QR PNG decode failed: {e}"),
+                        );
+                        self.qr_status.set_label(&format!("QR decode error: {e}"));
+                    }
                 }
-                Err(e) => {
-                    self.qr_status.set_label(&format!("QR decode error: {e}"));
-                }
-            },
+            }
             NeteaseEvent::QrPollTick { message } => {
                 self.qr_status.set_label(&message);
             }
