@@ -112,6 +112,21 @@ fn rsa_encrypt_raw(input_be: &[u8]) -> String {
     hex::encode(bytes)
 }
 
+/// Extract the `__csrf` value out of a raw `Cookie:` header. NetEase returns
+/// `200 OK` with an empty body if `csrf_token` is missing or wrong, so the
+/// search/playlist calls need it.
+fn csrf_token_from_cookie(cookie: &str) -> &str {
+    for part in cookie.split(';') {
+        let part = part.trim();
+        if let Some((k, v)) = part.split_once('=') {
+            if k.trim() == "__csrf" {
+                return v.trim();
+            }
+        }
+    }
+    ""
+}
+
 fn random_base62_key() -> String {
     let mut rng = StdRng::from_entropy();
     (0..16)
@@ -273,6 +288,7 @@ impl NeteaseClient {
             "type": 1,
             "limit": limit.min(100),
             "offset": 0,
+            "csrf_token": csrf_token_from_cookie(&self.cookie),
         })
         .to_string();
         let (params, enc_sec_key) = weapi_sign(&payload);
@@ -309,6 +325,7 @@ impl NeteaseClient {
             "id": playlist_id,
             "n": 1000,
             "s": 0,
+            "csrf_token": csrf_token_from_cookie(&self.cookie),
         })
         .to_string();
         let (params, enc_sec_key) = weapi_sign(&payload);
