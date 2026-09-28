@@ -1501,16 +1501,26 @@ impl NeteaseTab {
         };
 
         // ===== wire callbacks =====
-        // Login button on the main tab: kick off a QR login worker
-        // (via crossbeam msgchannel so the main loop's drain drives it).
+        // Login button on the main tab: kick off a QR login worker.
+        // The popup is shown immediately (so the user always gets feedback),
+        // and the worker populates the QR PNG + status when it succeeds.
         tab.login_btn.set_callback({
+            let mut qr_window = tab.qr_window.clone();
+            let mut qr_status = tab.qr_status.clone();
+            let qr_png = tab.qr_png.clone();
             move |_| {
-                start_qr_login_session();
+                start_qr_login_session(&mut qr_window, &mut qr_status, &qr_png);
             }
         });
         // Refresh button inside the popup: same handler
-        tab.qr_refresh_btn
-            .set_callback(move |_| start_qr_login_session());
+        tab.qr_refresh_btn.set_callback({
+            let mut qr_window = tab.qr_window.clone();
+            let mut qr_status = tab.qr_status.clone();
+            let qr_png = tab.qr_png.clone();
+            move |_| {
+                start_qr_login_session(&mut qr_window, &mut qr_status, &qr_png);
+            }
+        });
         // QR popup close: cancel any in-flight worker
         tab.qr_window.set_callback({
             move |_| {
@@ -1692,7 +1702,25 @@ impl NeteaseTab {
 /// The worker posts [`NeteaseEvent`] values via the application's msgchannel;
 /// the main loop's drain routes them through `MainForm::on_netease_event` →
 /// `NeteaseTab::handle_event`.
-fn start_qr_login_session() {
+///
+/// The popup window is shown immediately (with an "initialising" status) so
+/// the user always gets visual feedback, even if the worker fails.
+fn start_qr_login_session(
+    qr_window: &mut DoubleWindow,
+    qr_status: &mut Frame,
+    qr_png: &Rc<RefCell<Option<PngImage>>>,
+) {
+    // 1) show the popup immediately with an "initialising" status
+    qr_png.borrow_mut().take();
+    qr_status.set_label(&fl!("netease-qr-status-init"));
+    qr_window.show();
+    qr_window.redraw();
+    ui_log(
+        LogCategory::Info,
+        "NetEase: QR login requested — opening popup",
+    );
+
+    // 2) cancel any previous in-flight worker
     if let Some(flag) = QR_CANCEL.lock().unwrap().take() {
         flag.store(true, Ordering::Relaxed);
     }
