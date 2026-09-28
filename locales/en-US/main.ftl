@@ -63,6 +63,26 @@ netease-playlist-loaded = Playlist { $id } loaded, { $count } songs
 netease-bad-playlist = Invalid playlist id: { $id }
 netease-no-track = NetEase: nothing to play - search or load a playlist first
 netease-no-renderer = NetEase: no renderer available - discover and select one first
+netease-user-label = NetEase account:
+netease-logged-in = Signed in: { $nickname }
+netease-logged-out = Not signed in
+btn-netease-login = Sign in with QR
+btn-netease-logout = Sign out
+btn-netease-playlist-refresh = Refresh playlists
+netease-playlist-label = My playlists:
+netease-playlist-empty = (no playlists)
+netease-qr-window-title = NetEase QR Sign-in
+netease-qr-status-init = Generating QR code...
+netease-qr-status-waiting = Please scan with the NetEase app
+netease-qr-status-scanned = Scanned - please confirm on your phone
+netease-qr-status-success = Signed in successfully
+netease-qr-status-expired = QR code expired - click "Refresh QR code"
+netease-qr-status-error = QR error: { $msg }
+netease-login-failed = Sign-in failed: { $msg }
+netease-playlist-count = Loaded { $count } playlists
+netease-user-info-failed = Could not fetch user info: { $msg }
+netease-csrf-missing = NetEase: cookie is missing __csrf - search will return an empty body
+netease-empty-body = NetEase: { $path } returned 200 OK with an empty body - cookie is invalid or expired
 
 # Status messages
 status-setup-audio = Setup audio sources

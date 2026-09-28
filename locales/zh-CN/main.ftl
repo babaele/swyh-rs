@@ -63,6 +63,26 @@ netease-playlist-loaded = 歌单 { $id } 已载入 { $count } 首歌曲
 netease-bad-playlist = 无效的歌单 ID：{ $id }
 netease-no-track = 网易云：没有可播放的曲目，请先搜索或载入歌单
 netease-no-renderer = 网易云：没有可用的渲染器，请先发现并选择一台设备
+netease-user-label = 网易云账户：
+netease-logged-in = 已登录：{ $nickname }
+netease-logged-out = 未登录
+btn-netease-login = 扫码登录
+btn-netease-logout = 登出
+btn-netease-playlist-refresh = 刷新歌单
+netease-playlist-label = 我的歌单：
+netease-playlist-empty = 暂无歌单
+netease-qr-window-title = 网易云扫码登录
+netease-qr-status-init = 正在生成二维码…
+netease-qr-status-waiting = 请用网易云 APP 扫码
+netease-qr-status-scanned = 已扫码，请在手机上确认登录
+netease-qr-status-success = 登录成功
+netease-qr-status-expired = 二维码已过期，请点击「刷新二维码」
+netease-qr-status-error = 二维码错误：{ $msg }
+netease-login-failed = 登录失败：{ $msg }
+netease-playlist-count = 已加载 { $count } 个歌单
+netease-user-info-failed = 获取用户信息失败：{ $msg }
+netease-csrf-missing = NetEase：Cookie 缺少 __csrf — 搜索将返回空 body
+netease-empty-body = NetEase：{ $path } 返回 200 OK 但 body 为空 — Cookie 无效或过期
 
 # Status messages
 status-setup-audio = 配置音频源

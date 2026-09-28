@@ -269,7 +269,8 @@ fn main() -> Result<(), i32> {
     // renderer as-is (no capture, no transcoding) instead of the audio device.
     // Loading a playlist by id is not supported on the pure-Rust path
     // (ncmapi 1.0 has no playlist-detail endpoint).
-    let netease_tracks: Option<Vec<Track>> = if let Some(keywords) = args.netease_search.as_deref() {
+    let netease_tracks: Option<Vec<Track>> = if let Some(keywords) = args.netease_search.as_deref()
+    {
         match NeteaseClient::from_config().search(keywords, 50) {
             Ok(tracks) => Some(tracks),
             Err(e) => {
@@ -468,6 +469,10 @@ fn main() -> Result<(), i32> {
                             &format!("Failed to start playing on {}: {e}", outcome.remote_addr),
                         );
                     }
+                }
+                // NetEase events have no UI to update in the CLI; just log them.
+                MessageType::NeteaseEvent(ev) => {
+                    ui_log(LogCategory::Info, &format!("NetEase event: {ev:?}"));
                 }
                 MessageType::CaptureAborted => {
                     let mut capture_retry_count = 0i32;

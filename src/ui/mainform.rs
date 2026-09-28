@@ -6,17 +6,23 @@
 
 #![cfg(feature = "gui")]
 use crate::{
-    enums::streaming::{
-        StreamSize,
-        StreamingFormat::{self},
+    enums::{
+        messages::{MessageType, NeteaseEvent},
+        streaming::{
+            StreamSize,
+            StreamingFormat::{self},
+        },
     },
     fl,
     globals::statics::{
         APP_DATE, APP_VERSION, NSTYLES, NTHEMES, RUN_RMS_MONITOR, SAMPLE_RATES, SERVER_PORT,
-        STYLES, THEMES, get_config, get_config_mut, get_renderers, get_renderers_mut,
-        get_slim_renderers, get_slim_renderers_mut,
+        STYLES, THEMES, get_config, get_config_mut, get_msgchannel, get_renderers,
+        get_renderers_mut, get_slim_renderers, get_slim_renderers_mut,
     },
-    netease::{NeteaseClient, Track, netease_next, netease_stop, start_netease_queue},
+    netease::{
+        NeteaseClient, Playlist, Track, merge_set_cookies, netease_next, netease_stop,
+        persist_login_cookie, qr_check, qr_generate, start_netease_queue, status_label,
+    },
     rendercontrol::{Renderer, StreamInfo, WavData},
     slimproto::types::SlimRenderer,
     utils::{configuration::Configuration, i18n, traits::FwSlashPipeEscape, ui_logger::*},
@@ -28,7 +34,7 @@ use fltk::{
     enums::{self, Align, Color, Event, FrameType},
     frame::Frame,
     group::{Flex, FlexType, Group, Pack, PackType, Tabs},
-    image::SvgImage,
+    image::{PngImage, SvgImage},
     input::{Input, IntInput},
     menu::Choice,
     misc::Progress,
@@ -48,7 +54,10 @@ use std::{
     net::IpAddr,
     rc::Rc,
     str::FromStr,
-    sync::atomic::Ordering,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// fltk themes
@@ -115,6 +124,7 @@ const THEMES_ARRAY: &[ThemeDesc] = &[
 /// the main (and only) form
 pub struct MainForm {
     pub wind: DoubleWindow,
+    pub netease_tab: NeteaseTab,
     pub choose_audio_source_but: Choice,
     pub fmt_choice: Choice,
     pub ss_choice: Choice,
@@ -1192,22 +1202,56 @@ fn netease_play(
         ui_log(LogCategory::Error, &fl!("netease-no-renderer"));
         return;
     };
-    start_netease_queue(
-        &renderer,
-        local_addr,
-        server_port,
-        list,
-        start_index,
-    );
+    start_netease_queue(&renderer, local_addr, server_port, list, start_index);
 }
 
 /// NetEase tab: search/load tracks and push them to a renderer unmodified.
 ///
 /// The audio itself is relayed by `crate::netease::proxy`, which pipes the
 /// original NetEase file through byte for byte — no re-encoding.
-struct NeteaseTab {
+///
+/// The tab bundles:
+/// - a manual `Cookie:` field for users who prefer to paste a DevTools cookie
+/// - a "扫码登录" button that pops up a child `DoubleWindow` containing the
+///   QR PNG + polling status; once the scan succeeds, the merged
+///   `MUSIC_U=...; __csrf=...` Set-Cookie value is written back to the config
+/// - a "我的歌单" `Choice` that auto-fills after login and feeds tracks into
+///   the same browser that the search button uses
+///
+/// QR polling and playlist fetch run on worker threads; they post
+/// `MessageType::NeteaseEvent` events back to the main loop, which calls
+/// [`MainForm::on_netease_event`].
+pub struct NeteaseTab {
     group: Group,
+    // the QR popup window — owned here so its lifetime matches the tab
+    qr_window: DoubleWindow,
+    // the login status label inside the popup
+    qr_status: Frame,
+    // the QR PNG (kept alive here so FLTK's widget holds a valid pointer;
+    // `Frame::set_image` does NOT take ownership of the image)
+    qr_png: Rc<RefCell<Option<PngImage>>>,
+    // 200×200 container for the QR PNG
+    qr_image_frame: Frame,
+    // refresh button inside the QR popup
+    qr_refresh_btn: Button,
+    // "扫码登录" / "已登录: <nickname>" button on the main tab
+    login_btn: Button,
+    // "已登录: <nickname>" / "未登录" label on the main tab
+    user_label: Frame,
+    // "登出" button on the main tab
+    logout_btn: Button,
+    // "我的歌单" dropdown on the main tab
+    playlist_choice: Choice,
+    // "刷新歌单" button on the main tab
+    playlist_refresh_btn: Button,
+    // the currently-loaded user playlists (mirrors `playlist_choice`)
+    playlists: Rc<RefCell<Vec<Playlist>>>,
 }
+
+/// Currently-active QR login session's cancel flag. Set by
+/// [`start_qr_login_session`], cleared on terminal events / popup close.
+/// A fresh login cancels the previous flag before replacing it.
+static QR_CANCEL: std::sync::Mutex<Option<Arc<AtomicBool>>> = std::sync::Mutex::new(None);
 
 impl NeteaseTab {
     fn new(ctx: &TabCtx, local_addr: IpAddr) -> NeteaseTab {
@@ -1223,8 +1267,53 @@ impl NeteaseTab {
         col.set_margin(MARGIN);
         col.end();
 
-        // login cookie (optional, needed for VIP/lossless tracks). ncmapi handles
-        // the cookie file internally; we just persist whatever the user types.
+        // ===== shared state captured by every callback below =====
+        let tracks: Rc<RefCell<Vec<Track>>> = Rc::new(RefCell::new(Vec::new()));
+        let renderer_addrs: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let playlists: Rc<RefCell<Vec<Playlist>>> = Rc::new(RefCell::new(Vec::new()));
+        let qr_png: Rc<RefCell<Option<PngImage>>> = Rc::new(RefCell::new(None));
+        let browser = HoldBrowser::new(0, 0, 0, 0, "");
+
+        // ===== top: login + user row =====
+        // "扫码登录" button on the left, "已登录:<nickname>" + 登出 button on
+        // the right. The right-hand side is hidden until login succeeds; we
+        // build the widgets then `.hide()` the login row's right slot and
+        // remember the references so the worker events can show them later.
+        let mut login_btn = Button::new(0, 0, 0, ROW_H, "");
+        login_btn.set_label(&fl!("btn-netease-login"));
+        let mut user_label = Frame::default()
+            .with_size(0, ROW_H)
+            .with_label(&fl!("netease-logged-out"));
+        let mut logout_btn = Button::new(0, 0, 0, ROW_H, "");
+        logout_btn.set_label(&fl!("btn-netease-logout"));
+        user_label.hide();
+        logout_btn.hide();
+        let mut login_row = Flex::new(0, 0, GW, ROW_H, "");
+        login_row.set_type(FlexType::Row);
+        login_row.set_spacing(5);
+        login_row.end();
+        login_row.add(&login_btn);
+        login_row.add(&user_label);
+        login_row.add(&logout_btn);
+        col.add(&login_row);
+        col.fixed(&login_row, ROW_H);
+
+        // ===== playlists row (visible at all times; the Choice is empty until
+        // the user logs in) =====
+        let mut playlist_choice = Choice::new(0, 0, 0, ROW_H, "");
+        playlist_choice.add_choice(&fl!("netease-playlist-empty"));
+        let mut playlist_refresh_btn = Button::new(0, 0, 0, ROW_H, "");
+        playlist_refresh_btn.set_label(&fl!("btn-netease-playlist-refresh"));
+        add_row_with_button(
+            &mut col,
+            &fl!("netease-playlist-label"),
+            LABEL_W_NET,
+            80,
+            &playlist_choice,
+            &playlist_refresh_btn,
+        );
+
+        // ===== manual cookie input (advanced users) =====
         let mut cookie = Input::new(0, 0, 0, ROW_H, "");
         cookie.set_value(config.netease_cookie.as_deref().unwrap_or_default());
         cookie.set_callback(move |b| {
@@ -1241,19 +1330,29 @@ impl NeteaseTab {
         });
         add_labeled_row(&mut col, &fl!("netease-cookie-label"), LABEL_W_NET, &cookie);
 
-        // shared state captured by every callback below
-        let tracks: Rc<RefCell<Vec<Track>>> = Rc::new(RefCell::new(Vec::new()));
-        let renderer_addrs: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-        let mut browser = HoldBrowser::new(0, 0, 0, 0, "");
+        /// Replace the contents of the NetEase track browser with `found` and
+        /// remember them as the currently-playing queue. Used by both the search
+        /// button and the playlist selector.
+        fn fill_netease_browser(
+            tracks_ref: &Rc<RefCell<Vec<Track>>>,
+            browser: &mut HoldBrowser,
+            found: Vec<Track>,
+        ) {
+            *tracks_ref.borrow_mut() = found.clone();
+            browser.clear();
+            for t in &found {
+                browser.add(&format!("{} - {}", t.name, t.artist));
+            }
+        }
 
-        // search by keyword
-        let mut search_input = Input::new(0, 0, 0, ROW_H, "");
+        // ===== search row =====
+        let search_input = Input::new(0, 0, 0, ROW_H, "");
         let mut search_btn = Button::new(0, 0, 0, ROW_H, "");
         search_btn.set_label(&fl!("btn-netease-search"));
         search_btn.set_callback({
-            let mut browser = browser.clone();
             let tracks = tracks.clone();
-            let mut search_input = search_input.clone();
+            let mut browser = browser.clone();
+            let search_input = search_input.clone();
             move |_| {
                 let keywords = search_input.value().trim().to_string();
                 if keywords.is_empty() {
@@ -1270,12 +1369,7 @@ impl NeteaseTab {
                                 "keywords" = &keywords
                             ),
                         );
-                        *tracks.borrow_mut() = Vec::new();
-                        browser.clear();
-                        for t in &found {
-                            browser.add(&format!("{} - {}", t.name, t.artist));
-                        }
-                        *tracks.borrow_mut() = found;
+                        fill_netease_browser(&tracks, &mut browser, found);
                     }
                     Err(e) => ui_log(LogCategory::Error, &format!("NetEase: {keywords}: {e:#}")),
                 }
@@ -1290,17 +1384,11 @@ impl NeteaseTab {
             &search_btn,
         );
 
-        // (Loading a playlist by id is not yet supported on the pure-Rust
-        // path — ncmapi 1.0 does not expose a playlist-detail endpoint.
-        // Re-add the input/button once we either switch crates or ship a
-        // small raw-weapi shim for /playlist/detail.)
-
-        // the track list itself (created above, so the search callback
-        // can already refer to it); double-clicking a row plays from that track
+        // ===== track browser =====
         col.add(&browser);
 
-        // renderer selection
-        let mut renderer_choice = Choice::new(0, 0, 0, ROW_H, "");
+        // ===== renderer row =====
+        let renderer_choice = Choice::new(0, 0, 0, ROW_H, "");
         let mut refresh_btn = Button::new(0, 0, 0, ROW_H, "");
         refresh_btn.set_label(&fl!("btn-netease-refresh"));
         refresh_btn.set_callback({
@@ -1317,14 +1405,14 @@ impl NeteaseTab {
             &refresh_btn,
         );
 
-        // transport buttons
+        // ===== transport buttons =====
         let mut play_btn = Button::new(0, 0, 0, ROW_H, "");
         play_btn.set_label(&fl!("btn-netease-play"));
         play_btn.set_callback({
             let tracks = tracks.clone();
             let addrs = renderer_addrs.clone();
             let mut renderer_choice = renderer_choice.clone();
-            let mut browser = browser.clone();
+            let browser = browser.clone();
             move |_| {
                 let start = (browser.value() - 1).max(0) as usize;
                 netease_play(
@@ -1364,8 +1452,342 @@ impl NeteaseTab {
 
         group.add(&col);
 
-        NeteaseTab { group }
+        // ===== QR popup window =====
+        let mut qr_window = DoubleWindow::default()
+            .with_size(280, 360)
+            .with_label(&fl!("netease-qr-window-title"));
+        qr_window.size_range(280, 360, 280, 360);
+        let mut qr_col = Flex::new(0, 0, 280, 360, "");
+        qr_col.set_type(FlexType::Column);
+        qr_col.set_spacing(10);
+        qr_col.set_margin(10);
+        qr_col.end();
+        let mut qr_image_frame = Frame::new(0, 0, 200, 200, "");
+        qr_image_frame.set_frame(FrameType::BorderBox);
+        qr_col.add(&qr_image_frame);
+        qr_col.fixed(&qr_image_frame, 200);
+        let mut qr_status = Frame::default()
+            .with_size(0, ROW_H)
+            .with_label(&fl!("netease-qr-status-init"));
+        qr_status.set_align(Align::Center);
+        qr_col.add(&qr_status);
+        qr_col.fixed(&qr_status, ROW_H);
+        let qr_refresh_btn = Button::new(0, 0, 120, ROW_H, "");
+        // wrap refresh button in a centred Flex row
+        let mut qr_btn_row = Flex::new(0, 0, 260, ROW_H, "");
+        qr_btn_row.set_type(FlexType::Row);
+        qr_btn_row.end();
+        qr_btn_row.add(&qr_refresh_btn);
+        qr_col.add(&qr_btn_row);
+        qr_col.fixed(&qr_btn_row, ROW_H);
+        qr_window.add(&qr_col);
+        qr_window.end();
+        qr_window.hide();
+
+        // ===== build the tab =====
+        let mut tab = NeteaseTab {
+            group,
+            qr_window,
+            qr_status,
+            qr_png: qr_png.clone(),
+            qr_image_frame,
+            qr_refresh_btn,
+            login_btn,
+            user_label,
+            logout_btn,
+            playlist_choice,
+            playlist_refresh_btn,
+            playlists: playlists.clone(),
+        };
+
+        // ===== wire callbacks =====
+        // Login button on the main tab: kick off a QR login worker
+        // (via crossbeam msgchannel so the main loop's drain drives it).
+        tab.login_btn.set_callback({
+            move |_| {
+                start_qr_login_session();
+            }
+        });
+        // Refresh button inside the popup: same handler
+        tab.qr_refresh_btn
+            .set_callback({ move |_| start_qr_login_session() });
+        // QR popup close: cancel any in-flight worker
+        tab.qr_window.set_callback({
+            move |_| {
+                if let Some(flag) = QR_CANCEL.lock().unwrap().take() {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+        // Logout: clear cookie + reset visible widgets
+        tab.logout_btn.set_callback({
+            let mut user_label_clone = tab.user_label.clone();
+            let mut login_btn_clone = tab.login_btn.clone();
+            let mut logout_btn_clone = tab.logout_btn.clone();
+            let mut playlist_choice_clone = tab.playlist_choice.clone();
+            let playlists_clone = playlists.clone();
+            move |_| {
+                {
+                    let mut conf = get_config_mut();
+                    conf.netease_cookie = None;
+                    let _ = conf.update_config();
+                }
+                user_label_clone.set_label(&fl!("netease-logged-out"));
+                login_btn_clone.show();
+                logout_btn_clone.hide();
+                user_label_clone.hide();
+                playlist_choice_clone.clear();
+                playlist_choice_clone.add_choice(&fl!("netease-playlist-empty"));
+                *playlists_clone.borrow_mut() = Vec::new();
+                ui_log(LogCategory::Info, "NetEase: signed out (cookie cleared)");
+            }
+        });
+        // Refresh playlists: post a NeteaseEvent::PlaylistsLoaded after fetch
+        tab.playlist_refresh_btn.set_callback({
+            move |_| {
+                let client = NeteaseClient::from_config();
+                let tx = get_msgchannel().0.clone();
+                std::thread::spawn(move || {
+                    let account = match client.user_account() {
+                        Ok(a) => a,
+                        Err(e) => {
+                            let _ = tx.send(MessageType::NeteaseEvent(
+                                NeteaseEvent::PlaylistsFailed(format!("{e:#}")),
+                            ));
+                            return;
+                        }
+                    };
+                    let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::UserAccountLoaded(
+                        account.clone(),
+                    )));
+                    match client.user_playlists(account.id) {
+                        Ok(items) => {
+                            let _ = tx.send(MessageType::NeteaseEvent(
+                                NeteaseEvent::PlaylistsLoaded(items),
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(MessageType::NeteaseEvent(
+                                NeteaseEvent::PlaylistsFailed(format!("{e:#}")),
+                            ));
+                        }
+                    }
+                });
+            }
+        });
+        // Selecting a playlist → fetch its tracks and fill the browser
+        tab.playlist_choice.set_callback({
+            let tracks = tracks.clone();
+            let mut browser = browser.clone();
+            let playlists_clone = playlists.clone();
+            move |choice_widget| {
+                let idx = choice_widget.value() as usize;
+                let list = playlists_clone.borrow();
+                let Some(p) = list.get(idx).cloned() else {
+                    return;
+                };
+                drop(list);
+                let client = NeteaseClient::from_config();
+                match client.playlist_tracks(p.id) {
+                    Ok(found) => {
+                        ui_log(
+                            LogCategory::Info,
+                            &fl!(
+                                "netease-playlist-loaded",
+                                "id" = p.id,
+                                "count" = found.len()
+                            ),
+                        );
+                        fill_netease_browser(&tracks, &mut browser, found);
+                    }
+                    Err(e) => ui_log(
+                        LogCategory::Error,
+                        &format!("NetEase: playlist {}: {e:#}", p.id),
+                    ),
+                }
+            }
+        });
+
+        tab
     }
+
+    /// Handle a `NeteaseEvent` delivered by the main loop's drain. Runs on
+    /// the main thread, so direct widget mutation is safe.
+    #[allow(clippy::too_many_lines)]
+    pub fn handle_event(&mut self, ev: NeteaseEvent) {
+        match ev {
+            NeteaseEvent::QrImageReady { png_bytes } => match PngImage::from_data(&png_bytes) {
+                Ok(img) => {
+                    *self.qr_png.borrow_mut() = Some(img);
+                    if let Some(img_ref) = self.qr_png.borrow().as_ref() {
+                        self.qr_image_frame.set_image(Some(img_ref.clone()));
+                    }
+                    self.qr_window.show();
+                    self.qr_status.set_label(&fl!("netease-qr-status-waiting"));
+                }
+                Err(e) => {
+                    self.qr_status.set_label(&format!("QR decode error: {e}"));
+                }
+            },
+            NeteaseEvent::QrPollTick { message } => {
+                self.qr_status.set_label(&message);
+            }
+            NeteaseEvent::QrSuccess { nickname } => {
+                self.qr_window.hide();
+                self.qr_status.set_label(&fl!("netease-qr-status-success"));
+                self.login_btn.set_label(&fl!("netease-qr-status-success"));
+                self.user_label.show();
+                self.logout_btn.show();
+                if let Some(nick) = nickname {
+                    self.user_label
+                        .set_label(&fl!("netease-logged-in", "nickname" = nick.as_str()));
+                }
+                // worker already saved the cookie + fetched account/playlists
+            }
+            NeteaseEvent::QrExpired => {
+                self.qr_status.set_label(&fl!("netease-qr-status-expired"));
+                self.login_btn.set_label(&fl!("btn-netease-login"));
+            }
+            NeteaseEvent::QrError(msg) => {
+                self.qr_status
+                    .set_label(&fl!("netease-qr-status-error", "msg" = msg.as_str()));
+            }
+            NeteaseEvent::UserAccountLoaded(account) => {
+                self.user_label.set_label(&fl!(
+                    "netease-logged-in",
+                    "nickname" = account.nickname.as_str()
+                ));
+                self.user_label.show();
+                self.logout_btn.show();
+            }
+            NeteaseEvent::PlaylistsLoaded(items) => {
+                ui_log(
+                    LogCategory::Info,
+                    &fl!("netease-playlist-count", "count" = items.len()),
+                );
+                self.playlist_choice.clear();
+                if items.is_empty() {
+                    self.playlist_choice
+                        .add_choice(&fl!("netease-playlist-empty"));
+                } else {
+                    for p in &items {
+                        self.playlist_choice
+                            .add_choice(&format!("{} ({}首)", p.name, p.track_count));
+                    }
+                    let _ = self.playlist_choice.set_value(0);
+                }
+                *self.playlists.borrow_mut() = items;
+            }
+            NeteaseEvent::PlaylistsFailed(msg) => {
+                ui_log(
+                    LogCategory::Error,
+                    &fl!("netease-user-info-failed", "msg" = msg.as_str()),
+                );
+            }
+        }
+    }
+}
+
+/// Spawn a QR login worker thread. Cancels any previous in-flight session.
+/// The worker posts [`NeteaseEvent`] values via the application's msgchannel;
+/// the main loop's drain routes them through `MainForm::on_netease_event` →
+/// `NeteaseTab::handle_event`.
+fn start_qr_login_session() {
+    if let Some(flag) = QR_CANCEL.lock().unwrap().take() {
+        flag.store(true, Ordering::Relaxed);
+    }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    *QR_CANCEL.lock().unwrap() = Some(cancelled.clone());
+    let tx = get_msgchannel().0.clone();
+    std::thread::spawn(move || {
+        let client = NeteaseClient::new("");
+        let img = match qr_generate(&client) {
+            Ok(i) => i,
+            Err(e) => {
+                let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrError(format!(
+                    "{e:#}"
+                ))));
+                return;
+            }
+        };
+        let unikey = img.unikey.clone();
+        let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrImageReady {
+            png_bytes: img.png_bytes,
+        }));
+        let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrPollTick {
+            message: fl!("netease-qr-status-waiting"),
+        }));
+        // poll loop
+        loop {
+            // cancellable sleep (~1.5 s, 9 × 200 ms)
+            for _ in 0..9 {
+                if cancelled.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            if cancelled.load(Ordering::Relaxed) {
+                return;
+            }
+            let poll = match qr_check(&client, &unikey) {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrError(format!(
+                        "{e:#}"
+                    ))));
+                    continue;
+                }
+            };
+            let label = status_label(poll.status).to_string();
+            match poll.status {
+                crate::netease::QrStatus::Waiting | crate::netease::QrStatus::Scanned => {
+                    let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrPollTick {
+                        message: label,
+                    }));
+                }
+                crate::netease::QrStatus::Expired => {
+                    let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrExpired));
+                    return;
+                }
+                crate::netease::QrStatus::Success => {
+                    let cookie = merge_set_cookies(&poll.set_cookies);
+                    if let Err(e) = persist_login_cookie(&cookie) {
+                        let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrError(format!(
+                            "{e:#}"
+                        ))));
+                        return;
+                    }
+                    // fetch nickname + playlists in the same worker
+                    let nickname = client.user_account().ok().map(|a| a.nickname);
+                    let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrSuccess {
+                        nickname,
+                    }));
+                    if let Ok(account) = client.user_account() {
+                        match client.user_playlists(account.id) {
+                            Ok(items) => {
+                                let _ = tx.send(MessageType::NeteaseEvent(
+                                    NeteaseEvent::PlaylistsLoaded(items),
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(MessageType::NeteaseEvent(
+                                    NeteaseEvent::PlaylistsFailed(format!("{e:#}")),
+                                ));
+                            }
+                        }
+                    }
+                    return;
+                }
+                crate::netease::QrStatus::Error => {
+                    let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrError(format!(
+                        "qrcheck code {}",
+                        poll.code
+                    ))));
+                    return;
+                }
+            }
+        }
+    });
 }
 
 /// compute optimum height for the feedback log box on windows resize
@@ -1573,6 +1995,7 @@ impl MainForm {
             player_index: 0,
             slim_player_index: 0,
             wind,
+            netease_tab,
             choose_audio_source_but: audio_tab.choose_audio_source_but,
             fmt_choice: audio_tab.fmt_choice,
             ss_choice: audio_tab.ss_choice,

@@ -16,8 +16,9 @@
 //! | `/weapi/v6/playlist/detail`             | weapi  | list the tracks of a playlist            |
 //! | `/eapi/song/enhance/player/url/v1`      | eapi   | resolve a song id to a playable URL      |
 
-use super::Track;
+use super::{Playlist, QrImage, QrPoll, Track, UserAccount, status_from_code};
 use crate::globals::statics::get_config;
+use crate::utils::ui_logger::{LogCategory, ui_log};
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use cipher::generic_array::GenericArray;
@@ -25,15 +26,14 @@ use cipher::{BlockEncrypt, BlockEncryptMut, KeyInit, KeyIvInit};
 use md5::{Digest, Md5};
 use num_bigint::BigUint;
 use rand::{Rng, SeedableRng, rngs::StdRng};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ureq::Agent;
 
 /// how long a resolved song URL is reused before it is refreshed
 pub const URL_TTL: Duration = Duration::from_secs(300);
 
 /// browser UA NetEase expects on its CDN
-pub(super) const CDN_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
+pub(super) const CDN_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) \
      Chrome/122.0.0.0 Safari/537.36";
 /// the CDN only serves files to requests that look like they come from the site
 pub(super) const CDN_REFERER: &str = "https://music.163.com/";
@@ -118,10 +118,10 @@ fn rsa_encrypt_raw(input_be: &[u8]) -> String {
 fn csrf_token_from_cookie(cookie: &str) -> &str {
     for part in cookie.split(';') {
         let part = part.trim();
-        if let Some((k, v)) = part.split_once('=') {
-            if k.trim() == "__csrf" {
-                return v.trim();
-            }
+        if let Some((k, v)) = part.split_once('=')
+            && k.trim() == "__csrf"
+        {
+            return v.trim();
         }
     }
     ""
@@ -278,28 +278,62 @@ impl NeteaseClient {
             .with_context(|| format!("NetEase: POST {path}"))
     }
 
+    /// `GET https://music.163.com<path>` with the same browser-like headers
+    /// as `post()`. Used by the unauthenticated QR-login endpoints.
+    fn get(&self, path: &str) -> Result<ureq::http::Response<ureq::Body>> {
+        let url = format!("https://music.163.com{path}");
+        self.agent
+            .get(&url)
+            .header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            )
+            .header("Referer", "https://music.163.com/")
+            .header("Origin", "https://music.163.com")
+            .header("Cookie", &self.cookie)
+            .call()
+            .with_context(|| format!("NetEase: GET {path}"))
+    }
+
     /// Search for songs matching `keywords` (single-song mode).
     pub fn search(&self, keywords: &str, limit: u32) -> Result<Vec<Track>> {
         if keywords.trim().is_empty() {
             return Err(anyhow!("search keywords must not be blank"));
         }
+        let csrf = csrf_token_from_cookie(&self.cookie);
+        if csrf.is_empty() {
+            ui_log(
+                LogCategory::Warning,
+                "NetEase: cookie is missing __csrf — search will return an empty body",
+            );
+        }
+        ui_log(
+            LogCategory::Info,
+            &format!(
+                "NetEase: search '{}' cookie_len={} csrf8={}",
+                keywords,
+                self.cookie.len(),
+                &csrf[..csrf.len().min(8)]
+            ),
+        );
         let payload = serde_json::json!({
             "s": keywords,
             "type": 1,
             "limit": limit.min(100),
             "offset": 0,
-            "csrf_token": csrf_token_from_cookie(&self.cookie),
+            "csrf_token": csrf,
         })
         .to_string();
         let (params, enc_sec_key) = weapi_sign(&payload);
         let resp = self
             .post(
-            "/weapi/cloudsearch/get",
-            [
-                ("params", params.as_str()),
-                ("encSecKey", enc_sec_key.as_str()),
-            ],
-        )
+                "/weapi/cloudsearch/get",
+                [
+                    ("params", params.as_str()),
+                    ("encSecKey", enc_sec_key.as_str()),
+                ],
+            )
             .context("NetEase: /weapi/cloudsearch/get failed")?;
         #[derive(serde::Deserialize)]
         struct RawResp {
@@ -311,6 +345,7 @@ impl NeteaseClient {
             #[serde(default)]
             songs: Vec<RawSongLike>,
         }
+        check_not_empty_body(resp.headers(), "/weapi/cloudsearch/get")?;
         let body = resp
             .into_body()
             .read_to_string()
@@ -321,22 +356,29 @@ impl NeteaseClient {
 
     /// List the tracks of the playlist with NetEase id `playlist_id`.
     pub fn playlist_tracks(&self, playlist_id: u64) -> Result<Vec<Track>> {
+        let csrf = csrf_token_from_cookie(&self.cookie);
+        if csrf.is_empty() {
+            ui_log(
+                LogCategory::Warning,
+                "NetEase: cookie is missing __csrf — playlist lookup will return an empty body",
+            );
+        }
         let payload = serde_json::json!({
             "id": playlist_id,
             "n": 1000,
             "s": 0,
-            "csrf_token": csrf_token_from_cookie(&self.cookie),
+            "csrf_token": csrf,
         })
         .to_string();
         let (params, enc_sec_key) = weapi_sign(&payload);
         let resp = self
             .post(
-            "/weapi/v6/playlist/detail",
-            [
-                ("params", params.as_str()),
-                ("encSecKey", enc_sec_key.as_str()),
-            ],
-        )
+                "/weapi/v6/playlist/detail",
+                [
+                    ("params", params.as_str()),
+                    ("encSecKey", enc_sec_key.as_str()),
+                ],
+            )
             .context("NetEase: /weapi/v6/playlist/detail failed")?;
         #[derive(serde::Deserialize)]
         struct RawResp {
@@ -348,6 +390,7 @@ impl NeteaseClient {
             #[serde(default)]
             tracks: Vec<RawSongLike>,
         }
+        check_not_empty_body(resp.headers(), "/weapi/v6/playlist/detail")?;
         let body = resp
             .into_body()
             .read_to_string()
@@ -415,10 +458,9 @@ impl NeteaseClient {
             .ok_or_else(|| {
                 anyhow!("no playable url for song {song_id} (no copyright, or login/VIP required)")
             })?;
-        let url = raw
-            .url
-            .filter(|u| !u.is_empty())
-            .ok_or_else(|| anyhow!("no playable url for song {song_id} (no copyright, or login/VIP required)"))?;
+        let url = raw.url.filter(|u| !u.is_empty()).ok_or_else(|| {
+            anyhow!("no playable url for song {song_id} (no copyright, or login/VIP required)")
+        })?;
         let file_type = raw.r#type.unwrap_or_else(|| guess_type(&url));
         Ok(SongUrl {
             id: raw.id,
@@ -452,20 +494,215 @@ impl NeteaseClient {
         if let Some(r) = range {
             rq = rq.header("Range", r);
         }
-        rq.call().with_context(|| format!("fetching NetEase audio {url}"))
+        rq.call()
+            .with_context(|| format!("fetching NetEase audio {url}"))
     }
+
+    /// GET `/api/login/qrcode/generate?type=1&realtype=1`. The `qrimg` field
+    /// is a `data:image/png;base64,...` data URI; we strip the prefix and
+    /// return the raw PNG bytes so the GUI can decode them straight into a
+    /// `PngImage`.
+    pub fn qr_generate(&self) -> Result<QrImage> {
+        let resp = self.get("/api/login/qrcode/generate?type=1&realtype=1")?;
+        #[derive(serde::Deserialize)]
+        struct RawResp {
+            #[serde(default)]
+            data: Option<RawQrData>,
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct RawQrData {
+            #[serde(default)]
+            unikey: String,
+            #[serde(default)]
+            qrimg: String,
+        }
+        let body = resp
+            .into_body()
+            .read_to_string()
+            .context("reading qrcode/generate reply")?;
+        let parsed: RawResp =
+            serde_json::from_str(&body).context("parsing qrcode/generate reply")?;
+        let data = parsed
+            .data
+            .context("NetEase: qrcode/generate response missing `data`")?;
+        if data.unikey.is_empty() {
+            anyhow::bail!("NetEase: qrcode/generate returned empty unikey");
+        }
+        let png_bytes =
+            crate::netease::login::decode_qr_data_uri(&data.qrimg).context("qrcode qrimg")?;
+        Ok(QrImage {
+            unikey: data.unikey,
+            png_bytes,
+        })
+    }
+
+    /// GET `/api/login/qrcode/check?type=1&key=<unikey>&timestamp=<ms>`.
+    /// Returns the numeric code + Set-Cookie headers (only populated on
+    /// success).
+    pub fn qr_check(&self, unikey: &str) -> Result<QrPoll> {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = format!("/api/login/qrcode/check?type=1&key={unikey}&timestamp={ts}");
+        let resp = self.get(&path)?;
+        #[derive(serde::Deserialize)]
+        struct RawResp {
+            #[serde(default)]
+            code: i32,
+        }
+        let headers = resp.headers().clone();
+        let body = resp
+            .into_body()
+            .read_to_string()
+            .context("reading qrcode/check reply")?;
+        let parsed: RawResp = serde_json::from_str(&body).context("parsing qrcode/check reply")?;
+        let status = status_from_code(parsed.code);
+        let set_cookies = headers
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok().map(|s| s.to_string()))
+            .collect::<Vec<_>>();
+        Ok(QrPoll {
+            status,
+            code: parsed.code,
+            set_cookies,
+        })
+    }
+
+    /// POST `/weapi/nuser/account/get` — returns the logged-in user's id +
+    /// nickname. Fails (with a useful message) when the cookie is missing or
+    /// the login has expired.
+    pub fn user_account(&self) -> Result<UserAccount> {
+        let payload = serde_json::json!({
+            "csrf_token": csrf_token_from_cookie(&self.cookie),
+        })
+        .to_string();
+        let (params, enc_sec_key) = weapi_sign(&payload);
+        let resp = self
+            .post(
+                "/weapi/nuser/account/get",
+                [
+                    ("params", params.as_str()),
+                    ("encSecKey", enc_sec_key.as_str()),
+                ],
+            )
+            .context("NetEase: /weapi/nuser/account/get failed")?;
+        #[derive(serde::Deserialize)]
+        struct RawResp {
+            #[serde(default)]
+            profile: Option<RawProfile>,
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct RawProfile {
+            #[serde(default, alias = "userId")]
+            user_id: u64,
+            #[serde(default)]
+            nickname: String,
+        }
+        check_not_empty_body(resp.headers(), "/weapi/nuser/account/get")?;
+        let body = resp
+            .into_body()
+            .read_to_string()
+            .context("reading account/get reply")?;
+        let parsed: RawResp = serde_json::from_str(&body).context("parsing account/get reply")?;
+        let profile = parsed
+            .profile
+            .context("NetEase: account/get returned no profile — not logged in?")?;
+        Ok(UserAccount {
+            id: profile.user_id,
+            nickname: profile.nickname,
+        })
+    }
+
+    /// POST `/weapi/user/playlist` — returns the user's own + subscribed
+    /// playlists.
+    pub fn user_playlists(&self, uid: u64) -> Result<Vec<Playlist>> {
+        let payload = serde_json::json!({
+            "uid": uid,
+            "offset": 0,
+            "limit": 1000,
+            "csrf_token": csrf_token_from_cookie(&self.cookie),
+        })
+        .to_string();
+        let (params, enc_sec_key) = weapi_sign(&payload);
+        let resp = self
+            .post(
+                "/weapi/user/playlist",
+                [
+                    ("params", params.as_str()),
+                    ("encSecKey", enc_sec_key.as_str()),
+                ],
+            )
+            .context("NetEase: /weapi/user/playlist failed")?;
+        #[derive(serde::Deserialize)]
+        struct RawResp {
+            #[serde(default)]
+            playlist: Vec<RawPlaylist>,
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct RawPlaylist {
+            #[serde(default)]
+            id: u64,
+            #[serde(default)]
+            name: String,
+            #[serde(default, alias = "trackCount")]
+            track_count: u32,
+            #[serde(default)]
+            creator: Option<RawCreator>,
+            #[serde(default, alias = "coverImgUrl")]
+            cover_img_url: Option<String>,
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct RawCreator {
+            #[serde(default)]
+            nickname: String,
+        }
+        check_not_empty_body(resp.headers(), "/weapi/user/playlist")?;
+        let body = resp
+            .into_body()
+            .read_to_string()
+            .context("reading user/playlist reply")?;
+        let parsed: RawResp = serde_json::from_str(&body).context("parsing user/playlist reply")?;
+        Ok(parsed
+            .playlist
+            .into_iter()
+            .map(|p| Playlist {
+                id: p.id,
+                name: p.name,
+                track_count: p.track_count,
+                creator_nickname: p.creator.map_or(String::new(), |c| c.nickname),
+                cover_url: p.cover_img_url,
+            })
+            .collect())
+    }
+}
+
+/// NetEase returns 200 OK with `content-length: 0` when something about the
+/// request is wrong (missing csrf_token, bad signature, anti-bot trigger).
+/// Surface that case as a specific, actionable error before serde_json
+/// chokes on an empty string with the unhelpful "EOF while parsing" message.
+fn check_not_empty_body(headers: &ureq::http::HeaderMap, path: &str) -> Result<()> {
+    if let Some(cl) = headers.get("content-length")
+        && let Ok(s) = cl.to_str()
+        && s.trim() == "0"
+    {
+        anyhow::bail!(
+            "NetEase: {path} returned 200 OK with empty body — cookie is invalid, expired, or missing __csrf"
+        );
+    }
+    Ok(())
 }
 
 /// Convert a `(id, name, artists, album, duration)` raw shape into our `Track`.
 impl From<RawSongLike> for Track {
     fn from(s: RawSongLike) -> Track {
-        let artist = s
-            .ar
-            .iter()
-            .map(|a| a.name.as_str())
-            .filter(|n| !n.is_empty())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let artist =
+            s.ar.iter()
+                .map(|a| a.name.as_str())
+                .filter(|n| !n.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ");
         Track {
             id: s.id,
             name: s.name,

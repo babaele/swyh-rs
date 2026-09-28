@@ -286,6 +286,10 @@ fn main() {
                 MessageType::LogMessage(msg) => {
                     mf.add_log_msg(&msg);
                 }
+                // a NetEase tab worker posted an event (QR login / playlist)
+                MessageType::NeteaseEvent(ev) => {
+                    mf.netease_tab.handle_event(ev);
+                }
                 // a backgrounded renderer.spawn_play() attempt finished; roll
                 // back the optimistic "playing" state and button on failure
                 MessageType::PlayResult(outcome) => {
