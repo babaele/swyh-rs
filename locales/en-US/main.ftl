@@ -46,7 +46,6 @@ netease-api-label = API server:
 netease-cookie-label = Cookie (optional):
 netease-quality-label = Quality:
 netease-search-label = Search songs:
-netease-playlist-label = Playlist id:
 netease-renderer-label = Renderer:
 btn-netease-search = Search
 btn-netease-load = Load

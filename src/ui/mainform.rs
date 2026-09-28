@@ -1510,7 +1510,7 @@ impl NeteaseTab {
         });
         // Refresh button inside the popup: same handler
         tab.qr_refresh_btn
-            .set_callback({ move |_| start_qr_login_session() });
+            .set_callback(move |_| start_qr_login_session());
         // QR popup close: cancel any in-flight worker
         tab.qr_window.set_callback({
             move |_| {

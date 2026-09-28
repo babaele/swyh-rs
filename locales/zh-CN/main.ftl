@@ -46,7 +46,6 @@ netease-api-label = API 服务地址：
 netease-cookie-label = Cookie（可选）：
 netease-quality-label = 音质：
 netease-search-label = 搜索歌曲：
-netease-playlist-label = 歌单 ID：
 netease-renderer-label = 渲染器：
 btn-netease-search = 搜索
 btn-netease-load = 载入
