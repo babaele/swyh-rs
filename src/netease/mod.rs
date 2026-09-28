@@ -10,9 +10,9 @@
 //! - [`proxy`] : the `/netease/<id>[.ext]` HTTP endpoint the renderer pulls from
 //! - [`queue`] : play a list of tracks on a renderer, advancing automatically
 //!
-//! The API server is an external process (e.g.
-//! <https://github.com/Binaryify/NeteaseCloudMusicApi>); its base URL is
-//! configurable (`netease_api_base` in the config file).
+//! The login cookie (`netease_cookie` in the config file) is needed for
+//! VIP / lossless tracks. ncmapi talks to `music.163.com` directly — no
+//! external API server is required any more.
 
 pub mod api;
 pub mod proxy;

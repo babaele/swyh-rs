@@ -77,7 +77,9 @@ pub fn resolve_track(song_id: u64) -> Option<SongUrl> {
         }
     }
     let client = NeteaseClient::from_config();
-    match client.song_url(song_id) {
+    // ncmapi used to do 999_000 (lossless); eapi lets us honor a real bitrate,
+    // so just ask for lossless here too — the renderer relays bytes unchanged.
+    match client.song_url(song_id, 999_000) {
         Ok(song) => {
             if let Ok(mut cache) = URL_CACHE.write() {
                 cache.insert(song_id, (Instant::now(), song.clone()));

@@ -16,10 +16,7 @@ use crate::{
         STYLES, THEMES, get_config, get_config_mut, get_renderers, get_renderers_mut,
         get_slim_renderers, get_slim_renderers_mut,
     },
-    netease::{
-        NeteaseClient, Quality, Track, api::DEFAULT_API_BASE, netease_next, netease_stop,
-        start_netease_queue,
-    },
+    netease::{NeteaseClient, Track, netease_next, netease_stop, start_netease_queue},
     rendercontrol::{Renderer, StreamInfo, WavData},
     slimproto::types::SlimRenderer,
     utils::{configuration::Configuration, i18n, traits::FwSlashPipeEscape, ui_logger::*},
@@ -1226,32 +1223,8 @@ impl NeteaseTab {
         col.set_margin(MARGIN);
         col.end();
 
-        // base url of the NeteaseCloudMusicApi server
-        let mut api_base = Input::new(0, 0, 0, ROW_H, "");
-        api_base.set_value(
-            &config
-                .netease_api_base
-                .clone()
-                .unwrap_or_else(|| DEFAULT_API_BASE.to_string()),
-        );
-        api_base.set_callback(move |b| {
-            let value = b.value().trim().to_string();
-            if get_config().netease_api_base.as_deref() == Some(value.as_str()) {
-                return;
-            }
-            {
-                let mut conf = get_config_mut();
-                conf.netease_api_base = Some(value.clone());
-                let _ = conf.update_config();
-            }
-            ui_log(
-                LogCategory::Info,
-                &fl!("netease-api-changed", "url" = &value),
-            );
-        });
-        add_labeled_row(&mut col, &fl!("netease-api-label"), LABEL_W_NET, &api_base);
-
-        // login cookie (optional, needed for VIP/lossless and private lists)
+        // login cookie (optional, needed for VIP/lossless tracks). ncmapi handles
+        // the cookie file internally; we just persist whatever the user types.
         let mut cookie = Input::new(0, 0, 0, ROW_H, "");
         cookie.set_value(config.netease_cookie.as_deref().unwrap_or_default());
         cookie.set_callback(move |b| {
@@ -1268,46 +1241,7 @@ impl NeteaseTab {
         });
         add_labeled_row(&mut col, &fl!("netease-cookie-label"), LABEL_W_NET, &cookie);
 
-        // audio quality
-        let qualities = Quality::ALL;
-        let current_quality = config.netease_quality.unwrap_or_default();
-        let quality_idx = qualities
-            .iter()
-            .position(|q| *q == current_quality)
-            .unwrap_or(0) as i32;
-        let mut quality_choice = Choice::new(0, 0, 0, ROW_H, "");
-        for q in qualities {
-            quality_choice.add_choice(q.as_str());
-        }
-        quality_choice.set_value(quality_idx);
-        quality_choice.set_callback(move |b| {
-            let Some(text) = b.choice() else {
-                return;
-            };
-            let quality = Quality::from_str(&text).unwrap_or_default();
-            if get_config().netease_quality == Some(quality) {
-                return;
-            }
-            {
-                let mut conf = get_config_mut();
-                conf.netease_quality = Some(quality);
-                let _ = conf.update_config();
-            }
-            ui_log(
-                LogCategory::Info,
-                &fl!("netease-quality-changed", "quality" = quality.as_str()),
-            );
-        });
-        add_labeled_row(
-            &mut col,
-            &fl!("netease-quality-label"),
-            LABEL_W_NET,
-            &quality_choice,
-        );
-
-        // the tracks found by the last search / playlist load.
-        // The browser is created here (not where it is added to the column)
-        // so the search/load callbacks can capture a clone of it.
+        // shared state captured by every callback below
         let tracks: Rc<RefCell<Vec<Track>>> = Rc::new(RefCell::new(Vec::new()));
         let renderer_addrs: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let mut browser = HoldBrowser::new(0, 0, 0, 0, "");
@@ -1356,50 +1290,12 @@ impl NeteaseTab {
             &search_btn,
         );
 
-        // load a playlist by id
-        let mut playlist_input = Input::new(0, 0, 0, ROW_H, "");
-        let mut load_btn = Button::new(0, 0, 0, ROW_H, "");
-        load_btn.set_label(&fl!("btn-netease-load"));
-        load_btn.set_callback({
-            let mut browser = browser.clone();
-            let tracks = tracks.clone();
-            let mut playlist_input = playlist_input.clone();
-            move |_| {
-                let text = playlist_input.value().trim().to_string();
-                let Ok(id) = text.parse::<u64>() else {
-                    ui_log(
-                        LogCategory::Error,
-                        &fl!("netease-bad-playlist", "id" = &text),
-                    );
-                    return;
-                };
-                let client = NeteaseClient::from_config();
-                match client.playlist_tracks(id) {
-                    Ok(found) => {
-                        ui_log(
-                            LogCategory::Info,
-                            &fl!("netease-playlist-loaded", "count" = found.len(), "id" = id),
-                        );
-                        browser.clear();
-                        for t in &found {
-                            browser.add(&format!("{} - {}", t.name, t.artist));
-                        }
-                        *tracks.borrow_mut() = found;
-                    }
-                    Err(e) => ui_log(LogCategory::Error, &format!("NetEase: {id}: {e:#}")),
-                }
-            }
-        });
-        add_row_with_button(
-            &mut col,
-            &fl!("netease-playlist-label"),
-            LABEL_W_NET,
-            80,
-            &playlist_input,
-            &load_btn,
-        );
+        // (Loading a playlist by id is not yet supported on the pure-Rust
+        // path — ncmapi 1.0 does not expose a playlist-detail endpoint.
+        // Re-add the input/button once we either switch crates or ship a
+        // small raw-weapi shim for /playlist/detail.)
 
-        // the track list itself (created above, so the search/load callbacks
+        // the track list itself (created above, so the search callback
         // can already refer to it); double-clicking a row plays from that track
         col.add(&browser);
 
