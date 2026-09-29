@@ -47,15 +47,6 @@ winres = "0.1.12"
 [dependencies]
 cpal = { version = "0.18.2" }
 anyhow = "1"
-# NetEase weapi/eapi signing — pure-Rust crypto, no openssl/perl needed
-aes = "0.8"
-cbc = "0.1"
-num-bigint = "0.4"
-md-5 = "0.10"
-base64 = "0.22"
-hex = "0.4"
-rand = "0.8"
-cipher = "0.4"
 crossbeam-channel = "0.5.17"
 ctrlc = { version = "3.5.2", features = ["termination"], optional = true }
 dasp_sample = "0.11.0"

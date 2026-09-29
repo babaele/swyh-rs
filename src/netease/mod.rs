@@ -13,9 +13,13 @@
 //! - [`queue`] : play a list of tracks on a renderer, advancing automatically
 //!
 //! The login cookie (`netease_cookie` in the config file) is needed for
-//! VIP / lossless tracks and for fetching the user's own playlists. We sign
-//! weapi / eapi requests in pure Rust on top of `aes` / `num-bigint` / `md-5`
-//! and talk to `music.163.com` directly — no external API server is required.
+//! VIP / lossless tracks and for fetching the user's own playlists.
+//!
+//! NetEase retired its `weapi` (AES-CBC + RSA) and `eapi` (AES-ECB + MD5)
+//! channels: signed requests now always come back as `200 OK` with an empty
+//! body. We therefore talk to the same **unsigned** `/api/...` endpoints the
+//! current web player uses (see [`api`]) — so no request signing, no external
+//! API server, and no native crypto dependency is required at all.
 
 pub mod api;
 pub mod login;
@@ -24,8 +28,8 @@ pub mod queue;
 
 pub use api::{NeteaseClient, SongUrl};
 pub use login::{
-    blocking_qr_login, decode_qr_data_uri, merge_set_cookies, persist_login_cookie, qr_check,
-    qr_generate, status_from_code, status_label,
+    blocking_qr_login, merge_set_cookies, persist_login_cookie, qr_check, qr_generate,
+    status_from_code, status_label,
 };
 pub use proxy::{NETEASE_PATH_PREFIX, netease_track_url, parse_netease_path, serve_netease_track};
 pub use queue::{netease_next, netease_stop, start_netease_queue};
@@ -179,13 +183,14 @@ pub struct QrPoll {
     pub set_cookies: Vec<String>,
 }
 
-/// What `/api/login/qrcode/generate` returned.
+/// What the QR login returned: the key identifying the attempt plus the bytes
+/// of the rendered QR image (a JPEG from NetEase's CDN).
 #[derive(Debug, Clone)]
 pub struct QrImage {
     pub unikey: String,
-    /// Raw PNG bytes (already decoded from the `data:image/png;base64,...`
-    /// `qrimg` field the API returns).
-    pub png_bytes: Vec<u8>,
+    /// Raw image bytes — JPEG (`\xFF\xD8\xFF`) in practice; see
+    /// [`crate::ui::mainform`] which sniffs the magic to pick the decoder.
+    pub image_bytes: Vec<u8>,
 }
 
 #[cfg(test)]

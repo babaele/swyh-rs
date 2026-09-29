@@ -41,7 +41,7 @@ pub enum MessageType {
 pub enum NeteaseEvent {
     /// QR-code login: the worker fetched the QR PNG and is now polling.
     /// The GUI should render the PNG into the popup window.
-    QrImageReady { png_bytes: Vec<u8> },
+    QrImageReady { image_bytes: Vec<u8> },
     /// QR-code login: a non-terminal poll tick (waiting or scanned).
     /// The GUI should update the status label.
     QrPollTick { message: String },

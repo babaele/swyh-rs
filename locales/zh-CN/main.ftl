@@ -42,7 +42,6 @@ tab-status = 状态
 tab-netease = 网易云
 
 # 网易云音乐
-netease-api-label = API 服务地址：
 netease-cookie-label = Cookie（可选）：
 netease-quality-label = 音质：
 netease-search-label = 搜索歌曲：

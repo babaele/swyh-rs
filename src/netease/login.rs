@@ -1,26 +1,33 @@
 //! NetEase QR-code login + cookie persistence.
 //!
-//! The QR login protocol:
+//! The protocol NetEase's current web player uses (discovered by reverse
+//! engineering their login bundle, and verified end to end):
 //!
-//! 1. `GET /api/login/qrcode/generate?type=1&realtype=1` → `{ unikey, qrimg }`
-//!    `qrimg` is a `data:image/png;base64,...` PNG encoding the URL
-//!    `https://music.163.com/login?codekey=<unikey>`.
-//! 2. Poll `GET /api/login/qrcode/check?type=1&key=<unikey>&timestamp=<ms>`
-//!    every 1–2 s. Status codes:
+//! 1. `POST /api/login/qrcode/unikey`  form `type=1`
+//!    → `{"code":200, "unikey":"<uuid>"}`
+//! 2. `POST /api/web/qrcode/get` form `url=http://music.163.com/login?codekey=<unikey>&size=300`
+//!    → `{"code":200, "qrcodeImageUrl":"https://p6.music.126.net/....jpg"}`, whose
+//!    bytes are the QR image (JPEG) to display.
+//! 3. Poll `POST /api/login/qrcode/client/login` form `key=<unikey>&type=1`
+//!    roughly every second. Status codes:
 //!      - 801 = waiting for scan
 //!      - 802 = QR expired (> ~3 min)
 //!      - 803 = scanned, waiting for phone confirmation
 //!      - 800 = success; response `Set-Cookie` headers carry the login cookies
 //!
-//! No external API server, no Node, no OpenSSL — just [`NeteaseClient`] and
-//! `ureq`.
+//! The old `/api/login/qrcode/generate` + `/api/login/qrcode/check` pair has
+//! been removed server-side (it answers `{"code":404,"message":"接口未找到！"}`),
+//! and the whole `weapi` channel now returns `200 OK` with an empty body — so
+//! none of that is used any more.
+//!
+//! No external API server, no Node, no OpenSSL, no request signing — just
+//! [`NeteaseClient`] and `ureq`.
 
 use crate::netease::{NeteaseClient, QrImage, QrPoll, QrStatus};
 use crate::utils::ui_logger::{LogCategory, ui_log};
 use anyhow::{Context, Result};
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 
-/// Issue a fresh QR code. Returns the decoded PNG bytes + the `unikey`
+/// Issue a fresh QR code. Returns the decoded image bytes + the `unikey`
 /// the caller has to pass to subsequent [`qr_check`] polls.
 pub fn qr_generate(client: &NeteaseClient) -> Result<QrImage> {
     client
@@ -109,18 +116,6 @@ pub fn persist_login_cookie(cookie: &str) -> Result<()> {
     Ok(())
 }
 
-/// Optional helper used by the QR code: decode the `data:image/png;base64,...`
-/// field the generate endpoint returns into raw PNG bytes. Exposed so the GUI
-/// layer can also use it if it ever wants to fetch a QR via a different path.
-pub fn decode_qr_data_uri(data_uri: &str) -> Result<Vec<u8>> {
-    let prefix = "base64,";
-    let Some(idx) = data_uri.find(prefix) else {
-        anyhow::bail!("QR image is not a base64 data URI");
-    };
-    let b64 = &data_uri[idx + prefix.len()..];
-    B64.decode(b64).context("decoding QR image base64")
-}
-
 /// Map NetEase's numeric status code to our [`QrStatus`]. Unknown codes
 /// (anything other than 801/802/803/800) collapse to [`QrStatus::Error`].
 #[must_use]
@@ -159,14 +154,14 @@ pub fn blocking_qr_login() -> Result<Option<String>> {
     ui_log(
         LogCategory::Info,
         &format!(
-            "NetEase: QR generated (unikey={}, {} bytes PNG)",
+            "NetEase: QR generated (unikey={}, {} bytes image)",
             img.unikey,
-            img.png_bytes.len()
+            img.image_bytes.len()
         ),
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     while std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(1500));
+        std::thread::sleep(std::time::Duration::from_millis(1200));
         let poll = qr_check(&client, &img.unikey)?;
         ui_log(
             LogCategory::Info,
@@ -201,13 +196,5 @@ mod tests {
         assert_eq!(status_from_code(803), QrStatus::Scanned);
         assert_eq!(status_from_code(800), QrStatus::Success);
         assert_eq!(status_from_code(999), QrStatus::Error);
-    }
-
-    #[test]
-    fn decode_qr_data_uri_strips_prefix() {
-        // 1×1 transparent PNG, valid base64
-        let uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
-        let bytes = decode_qr_data_uri(uri).unwrap();
-        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     }
 }

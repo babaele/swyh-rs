@@ -34,7 +34,7 @@ use fltk::{
     enums::{self, Align, Color, Event, FrameType},
     frame::Frame,
     group::{Flex, FlexType, Group, Pack, PackType, Tabs},
-    image::{PngImage, SvgImage},
+    image::{JpegImage, PngImage, RgbImage, SvgImage},
     input::{Input, IntInput},
     menu::Choice,
     misc::Progress,
@@ -1229,7 +1229,7 @@ pub struct NeteaseTab {
     qr_status: Frame,
     // the QR PNG (kept alive here so FLTK's widget holds a valid pointer;
     // `Frame::set_image` does NOT take ownership of the image)
-    qr_png: Rc<RefCell<Option<PngImage>>>,
+    qr_png: Rc<RefCell<Option<RgbImage>>>,
     // 200×200 container for the QR PNG
     qr_image_frame: Frame,
     // refresh button inside the QR popup
@@ -1271,7 +1271,7 @@ impl NeteaseTab {
         let tracks: Rc<RefCell<Vec<Track>>> = Rc::new(RefCell::new(Vec::new()));
         let renderer_addrs: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let playlists: Rc<RefCell<Vec<Playlist>>> = Rc::new(RefCell::new(Vec::new()));
-        let qr_png: Rc<RefCell<Option<PngImage>>> = Rc::new(RefCell::new(None));
+        let qr_png: Rc<RefCell<Option<RgbImage>>> = Rc::new(RefCell::new(None));
         let browser = HoldBrowser::new(0, 0, 0, 0, "");
 
         // ===== top: login + user row =====
@@ -1632,25 +1632,38 @@ impl NeteaseTab {
     #[allow(clippy::too_many_lines)]
     pub fn handle_event(&mut self, ev: NeteaseEvent) {
         match ev {
-            NeteaseEvent::QrImageReady { png_bytes } => {
+            NeteaseEvent::QrImageReady { image_bytes } => {
                 ui_log(
                     LogCategory::Info,
                     &format!(
-                        "NetEase: QR image received, {} bytes, decoding PNG…",
-                        png_bytes.len()
+                        "NetEase: QR image received, {} bytes, decoding…",
+                        image_bytes.len()
                     ),
                 );
-                match PngImage::from_data(&png_bytes) {
-                    Ok(img) => {
+                // NetEase serves the QR as a JPEG; sniff the magic bytes so we
+                // still cope if they ever switch back to PNG.
+                let is_png = image_bytes.starts_with(b"\x89PNG\r\n\x1a\n");
+                let img: std::result::Result<RgbImage, String> = if is_png {
+                    PngImage::from_data(&image_bytes)
+                        .and_then(|i| i.to_rgb())
+                        .map_err(|e| e.to_string())
+                } else {
+                    JpegImage::from_data(&image_bytes)
+                        .and_then(|i| i.to_rgb())
+                        .map_err(|e| e.to_string())
+                };
+                match img {
+                    Ok(image) => {
                         ui_log(
                             LogCategory::Info,
                             &format!(
-                                "NetEase: QR PNG decoded, {}x{}, drawing into popup",
-                                img.width(),
-                                img.height()
+                                "NetEase: QR image decoded ({}x{}, {}), drawing into popup",
+                                image.width(),
+                                image.height(),
+                                if is_png { "PNG" } else { "JPEG" }
                             ),
                         );
-                        *self.qr_png.borrow_mut() = Some(img);
+                        *self.qr_png.borrow_mut() = Some(image);
                         let qr_png_clone = {
                             let borrow = self.qr_png.borrow();
                             borrow.as_ref().map(|i| i.clone())
@@ -1661,12 +1674,13 @@ impl NeteaseTab {
                         }
                         self.qr_window.show();
                         self.qr_window.redraw();
+                        app::awake();
                         self.qr_status.set_label(&fl!("netease-qr-status-waiting"));
                     }
                     Err(e) => {
                         ui_log(
                             LogCategory::Error,
-                            &format!("NetEase: QR PNG decode failed: {e}"),
+                            &format!("NetEase: QR image decode failed: {e}"),
                         );
                         self.qr_status.set_label(&format!("QR decode error: {e}"));
                     }
@@ -1676,6 +1690,7 @@ impl NeteaseTab {
                 self.qr_status.set_label(&message);
             }
             NeteaseEvent::QrSuccess { nickname } => {
+                ui_log(LogCategory::Info, "NetEase: QR login succeeded");
                 self.qr_window.hide();
                 self.qr_status.set_label(&fl!("netease-qr-status-success"));
                 self.login_btn.set_label(&fl!("netease-qr-status-success"));
@@ -1688,10 +1703,15 @@ impl NeteaseTab {
                 // worker already saved the cookie + fetched account/playlists
             }
             NeteaseEvent::QrExpired => {
+                ui_log(LogCategory::Warning, "NetEase: QR code expired");
                 self.qr_status.set_label(&fl!("netease-qr-status-expired"));
                 self.login_btn.set_label(&fl!("btn-netease-login"));
             }
             NeteaseEvent::QrError(msg) => {
+                ui_log(
+                    LogCategory::Error,
+                    &format!("NetEase: QR login error — {msg}"),
+                );
                 self.qr_status
                     .set_label(&fl!("netease-qr-status-error", "msg" = msg.as_str()));
             }
@@ -1741,7 +1761,7 @@ impl NeteaseTab {
 fn start_qr_login_session(
     qr_window: &mut DoubleWindow,
     qr_status: &mut Frame,
-    qr_png: &Rc<RefCell<Option<PngImage>>>,
+    qr_png: &Rc<RefCell<Option<RgbImage>>>,
 ) {
     // 1) show the popup immediately with an "initialising" status
     qr_png.borrow_mut().take();
@@ -1773,7 +1793,7 @@ fn start_qr_login_session(
         };
         let unikey = img.unikey.clone();
         let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrImageReady {
-            png_bytes: img.png_bytes,
+            image_bytes: img.image_bytes,
         }));
         let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrPollTick {
             message: fl!("netease-qr-status-waiting"),
@@ -1818,23 +1838,43 @@ fn start_qr_login_session(
                         ))));
                         return;
                     }
-                    // fetch nickname + playlists in the same worker
-                    let nickname = client.user_account().ok().map(|a| a.nickname);
+                    if cookie.is_empty() {
+                        let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrError(
+                            "login succeeded but the server sent no Set-Cookie".to_string(),
+                        )));
+                        return;
+                    }
+                    // the client we polled with has no cookie — rebuild one that
+                    // carries the freshly granted session
+                    let client = NeteaseClient::new(cookie.clone());
                     let _ = tx.send(MessageType::NeteaseEvent(NeteaseEvent::QrSuccess {
-                        nickname,
+                        nickname: None,
                     }));
-                    if let Ok(account) = client.user_account() {
-                        match client.user_playlists(account.id) {
-                            Ok(items) => {
-                                let _ = tx.send(MessageType::NeteaseEvent(
-                                    NeteaseEvent::PlaylistsLoaded(items),
-                                ));
+                    // fetch nickname + playlists in the same worker
+                    match client.user_account() {
+                        Ok(account) => {
+                            let _ = tx.send(MessageType::NeteaseEvent(
+                                NeteaseEvent::UserAccountLoaded(account.clone()),
+                            ));
+                            match client.user_playlists(account.id) {
+                                Ok(items) => {
+                                    let _ = tx.send(MessageType::NeteaseEvent(
+                                        NeteaseEvent::PlaylistsLoaded(items),
+                                    ));
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(MessageType::NeteaseEvent(
+                                        NeteaseEvent::PlaylistsFailed(format!("{e:#}")),
+                                    ));
+                                }
                             }
-                            Err(e) => {
-                                let _ = tx.send(MessageType::NeteaseEvent(
-                                    NeteaseEvent::PlaylistsFailed(format!("{e:#}")),
-                                ));
-                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(MessageType::NeteaseEvent(
+                                NeteaseEvent::PlaylistsFailed(format!(
+                                    "获取用户信息失败（cookie 已保存，请点刷新歌单重试）: {e:#}"
+                                )),
+                            ));
                         }
                     }
                     return;
